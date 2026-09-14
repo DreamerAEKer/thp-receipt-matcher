@@ -63,24 +63,30 @@
     <!-- Actions & Quick TR Tracker -->
     <div class="flex items-center gap-2">
 
-      <!-- TR Fast Track Bar -->
+      <!-- TR Fast Track Bar (Live API) -->
       <div class="flex items-center bg-slate-50 border border-slate-300 rounded-lg p-0.5 text-xs shadow-inner">
-        <div class="px-2 py-1 bg-slate-200 text-slate-700 font-mono font-bold rounded-l flex items-center gap-1">
+        <div class="px-2 py-1 bg-slate-200 text-slate-700 font-mono font-bold rounded-l flex items-center gap-1 cursor-pointer" id="btnEditZipPrefix" title="คลิกเพื่อเปลี่ยนรหัสต้นทาง">
           <i class="fa-solid fa-location-arrow text-slate-500 text-[10px]"></i>
           <span id="labelZipPrefix">(10501)</span>
         </div>
         <input type="text" id="trNumberInput" value="11476142" placeholder="เลข TR เช่น 11476142" 
                class="w-28 px-2 py-1 text-xs font-mono font-semibold bg-transparent focus:outline-none text-slate-900">
         <button id="btnFetchTR" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded font-medium flex items-center gap-1 transition shadow-xs">
-          <i class="fa-solid fa-magnifying-glass"></i>
-          <span>ค้นหา TR</span>
+          <i class="fa-solid fa-cloud-arrow-down"></i>
+          <span>ดึงข้อมูล TR</span>
         </button>
       </div>
+
+      <!-- API Settings Button -->
+      <button id="btnOpenApiModal" class="p-1.5 px-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg text-slate-700 text-xs font-medium flex items-center gap-1 transition" title="ตั้งค่าเชื่อมต่อ API">
+        <i class="fa-solid fa-key text-amber-500"></i>
+        <span class="hidden md:inline">API</span>
+      </button>
 
       <!-- Sync Mode Status -->
       <label class="cursor-pointer flex items-center gap-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-800 px-2.5 py-1.5 rounded-lg text-xs font-medium transition select-none">
         <input type="checkbox" id="syncScrollToggle" checked class="w-3.5 h-3.5 text-red-600 rounded focus:ring-red-500">
-        <span class="flex items-center gap-1"><i class="fa-solid fa-arrows-rotate text-red-600 text-[11px]"></i> Sync อัตโนมัติ</span>
+        <span class="flex items-center gap-1"><i class="fa-solid fa-arrows-rotate text-red-600 text-[11px]"></i> Sync</span>
       </label>
 
       <!-- Camera Capture Button (ถ่ายรูปผ่านแอป) -->
@@ -97,16 +103,11 @@
       </label>
 
       <!-- Import Excel Button -->
-      <label class="cursor-pointer px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all shadow-emerald-200">
+      <label class="cursor-pointer px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all shadow-emerald-200" title="นำเข้า Excel สำรอง">
         <i class="fa-solid fa-file-excel"></i>
-        <span>นำเข้า Excel</span>
+        <span>Excel</span>
         <input type="file" id="excelFileInput" accept=".xlsx, .xls, .csv" class="hidden">
       </label>
-
-      <button id="btnPasteModal" class="px-2.5 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-lg text-xs font-medium flex items-center gap-1 transition-all" title="วางตาราง">
-        <i class="fa-regular fa-clipboard"></i>
-        <span>วางตาราง</span>
-      </button>
 
       <button id="btnResetData" title="โหลดตัวอย่างตั้งต้น" class="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all">
         <i class="fa-solid fa-arrow-rotate-left"></i>
@@ -227,6 +228,42 @@
 
   </main>
 
+  <!-- MODAL: API & AUTH SETTINGS (ตั้งค่าเชื่อมต่อตรงระบบ ปณท) -->
+  <div id="apiSettingsModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 hidden">
+    <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden">
+      <div class="bg-slate-900 text-white px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <i class="fa-solid fa-plug-circle-bolt text-amber-400"></i>
+          <h3 class="font-bold text-sm">ตั้งค่าเชื่อมต่อ API โดยตรง (Track ปณท)</h3>
+        </div>
+        <button id="btnCloseApiModal" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="p-5 space-y-4 text-xs">
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1">รหัสไปรษณีย์ต้นทางเริ่มต้น (Prefix):</label>
+          <input type="text" id="apiZipPrefixInput" value="10501" class="w-full p-2 border border-slate-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-red-500">
+          <p class="text-[11px] text-slate-400 mt-1">มักจะเป็นรหัสเดิมตลอด เช่น ปณก. 10501</p>
+        </div>
+
+        <div>
+          <label class="block font-semibold text-slate-700 mb-1">Authorization Token หรือ Cookie (จากหน้าเว็บ ปณท):</label>
+          <textarea id="apiTokenInput" rows="4" class="w-full p-2 border border-slate-300 rounded-lg font-mono text-[11px] focus:ring-2 focus:ring-red-500" placeholder="นำ Bearer token หรือ Session token มาวางที่นี่ (บันทึกในเครื่องอัตโนมัติ)"></textarea>
+          <p class="text-[11px] text-slate-500 mt-1">
+            <i class="fa-solid fa-circle-info text-blue-500"></i> สามารถก๊อปปี้จากแท็บ Network ในหน้า Dashboard ปณท มาวางเพียงครั้งเดียว เพื่อให้ระบบดึงข้อมูลอัตโนมัติ
+          </p>
+        </div>
+
+        <div class="bg-amber-50 border border-amber-200 p-3 rounded-lg text-amber-800 text-[11px] leading-relaxed">
+          <strong>หมายเหตุ:</strong> หากยังไม่ได้ใส่ Token เมื่อกดปุ่ม "ดึงข้อมูล TR" ระบบจะใช้ชุดข้อมูลจำลองที่เตรียมไว้ และมีปุ่มเปิดส่งรหัสไปยังหน้าเว็บ ปณท ทันที
+        </div>
+      </div>
+      <div class="bg-slate-50 px-4 py-3 border-t border-slate-200 flex items-center justify-end gap-2">
+        <button id="btnCancelApiModal" class="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-200 rounded-lg transition">ปิด</button>
+        <button id="btnSaveApiSettings" class="px-4 py-1.5 text-xs bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg shadow-sm transition">บันทึกการตั้งค่า</button>
+      </div>
+    </div>
+  </div>
+
   <!-- MODAL: CAMERA CAPTURE (ถ่ายรูปใบเสร็จผ่านแอป) -->
   <div id="cameraModal" class="fixed inset-0 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4 z-50 hidden">
     <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden flex flex-col">
@@ -238,10 +275,8 @@
         <button id="btnCloseCameraModal" class="text-slate-400 hover:text-white text-base"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <div class="p-4 flex flex-col items-center bg-slate-950">
-        <!-- Video Stream Preview -->
         <div class="relative w-full aspect-[3/4] max-h-[55vh] bg-black rounded-xl overflow-hidden border border-slate-700 flex items-center justify-center">
           <video id="cameraVideo" autoplay playsinline class="w-full h-full object-contain"></video>
-          <!-- Receipt overlay guide -->
           <div class="absolute inset-x-6 inset-y-4 border-2 border-dashed border-rose-500/60 rounded-lg pointer-events-none flex flex-col justify-between p-3">
             <span class="text-[11px] text-rose-300 bg-black/60 px-2 py-0.5 rounded self-start">วางกระดาษใบเสร็จให้อยู่ในกรอบ</span>
             <span class="text-[11px] text-rose-300 bg-black/60 px-2 py-0.5 rounded self-end">ระบบจะตรวจจับอัตโนมัติ</span>
@@ -253,34 +288,10 @@
         <button id="btnSwitchCamera" class="p-3 text-slate-300 hover:text-white rounded-full bg-slate-800 transition" title="สลับกล้องหน้า/หลัง">
           <i class="fa-solid fa-camera-rotate text-lg"></i>
         </button>
-        <!-- Capture Shutter Button -->
         <button id="btnCapturePhoto" class="w-14 h-14 rounded-full bg-rose-600 hover:bg-rose-500 border-4 border-white flex items-center justify-center shadow-lg transition active:scale-95">
           <i class="fa-solid fa-camera text-white text-xl"></i>
         </button>
         <button id="btnCancelCamera" class="px-4 py-2 text-xs text-slate-300 hover:text-white bg-slate-800 rounded-lg transition">ปิด</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- MODAL: PASTE EXCEL / RAW TEXT DATA -->
-  <div id="pasteModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 hidden">
-    <div class="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-xl overflow-hidden">
-      <div class="bg-slate-50 px-4 py-3 border-b border-slate-200 flex items-center justify-between">
-        <div class="flex items-center gap-2">
-          <i class="fa-regular fa-clipboard text-red-600"></i>
-          <h3 class="font-bold text-sm text-slate-800">วางข้อมูลตารางจาก Excel หรือเว็บ Track & Trace</h3>
-        </div>
-        <button id="btnClosePasteModal" class="text-slate-400 hover:text-slate-600 text-sm"><i class="fa-solid fa-xmark"></i></button>
-      </div>
-      <div class="p-4 space-y-3">
-        <p class="text-xs text-slate-600">
-          คัดลอก (Copy) ข้อมูลตารางจาก Excel หรือข้อความจากหน้าเว็บ แล้ววางลงในช่องนี้ ระบบจะดึงเลขแทร็กกิ้ง 13 หลัก, ชื่อปลายทาง และสถานะมาจับคู่ตามลำดับใบเสร็จให้อัตโนมัติ:
-        </p>
-        <textarea id="pasteDataTextarea" rows="8" class="w-full p-3 text-xs font-mono bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white" placeholder="ตัวอย่าง:&#10;JG073577939TH    เนินมะปราง    นำจ่ายสำเร็จ    01 ก.ย. 2569 11:48 น.&#10;JG073580650TH    ราษฎร์บูรณะ   นำจ่ายสำเร็จ    01 ก.ย. 2569 11:57 น."></textarea>
-      </div>
-      <div class="bg-slate-50 px-4 py-3 border-t border-slate-200 flex items-center justify-end gap-2">
-        <button id="btnCancelPaste" class="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-200 rounded-lg transition">ยกเลิก</button>
-        <button id="btnProcessPaste" class="px-4 py-1.5 text-xs bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg shadow-sm transition">นำเข้าและประมวลผล</button>
       </div>
     </div>
   </div>
