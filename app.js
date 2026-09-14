@@ -10,7 +10,10 @@ const state = {
   rotation: 0,
   photos: [],
   isSyncEnabled: true,
-  isScrollingByProgram: false
+  isScrollingByProgram: false,
+  cameraStream: null,
+  cameraFacingMode: 'environment', // back camera by default for receipts
+  defaultZipPrefix: '10501'
 };
 
 // Initialize
@@ -29,6 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupPhotoControls();
   setupEventListeners();
   setupSyncScroll();
+  setupCamera();
   renderPhotoTabs();
   renderItems();
   updateStats();
@@ -89,7 +93,7 @@ function renderPhotoTabs() {
     );
     btn.textContent = "หน้า " + (idx + 1);
     btn.title = photo.label;
-    btn.onclick = () => switchPhoto(idx, true); // true = scroll right side to start of this page
+    btn.onclick = () => switchPhoto(idx, true);
     container.appendChild(btn);
   });
 }
@@ -101,7 +105,6 @@ function switchPhoto(index, scrollRightList = false) {
   img.src = state.photos[index].file;
   renderPhotoTabs();
 
-  // If user explicitly switched photo tab, scroll right side list to the first item of this photo
   if (scrollRightList && state.isSyncEnabled) {
     const photoMeta = state.photos[index];
     if (photoMeta && photoMeta.startNo) {
@@ -119,7 +122,6 @@ function setupSyncScroll() {
   const rightList = document.getElementById('itemsList');
   const leftContainer = document.getElementById('receiptContainer');
 
-  // When Right List is scrolled -> automatically detect visible items and switch photo / highlight
   let scrollTimeout;
   rightList.addEventListener('scroll', () => {
     if (!state.isSyncEnabled || state.isScrollingByProgram) return;
@@ -130,7 +132,6 @@ function setupSyncScroll() {
     }, 80);
   });
 
-  // When Left Photo container is scrolled -> proportion scroll right
   let leftScrollTimeout;
   leftContainer.addEventListener('scroll', () => {
     if (!state.isSyncEnabled || state.isScrollingByProgram) return;
@@ -147,7 +148,6 @@ function syncLeftWithRightScroll() {
   const cards = Array.from(rightList.children);
   const containerTop = rightList.getBoundingClientRect().top;
 
-  // Find the top-most visible card
   let topVisibleItem = null;
   for (const card of cards) {
     const rect = card.getBoundingClientRect();
@@ -210,7 +210,103 @@ function highlightItemNo(itemNo) {
   }
 }
 
+// Camera Capture Feature (ถ่ายรูปใบเสร็จผ่านแอป)
+function setupCamera() {
+  const modal = document.getElementById('cameraModal');
+  const video = document.getElementById('cameraVideo');
+  const canvas = document.getElementById('cameraCanvas');
+  const btnOpen = document.getElementById('btnOpenCamera');
+  const btnClose = document.getElementById('btnCloseCameraModal');
+  const btnCancel = document.getElementById('btnCancelCamera');
+  const btnCapture = document.getElementById('btnCapturePhoto');
+  const btnSwitch = document.getElementById('btnSwitchCamera');
+
+  async function startCamera() {
+    try {
+      if (state.cameraStream) {
+        state.cameraStream.getTracks().forEach(track => track.stop());
+      }
+      const constraints = {
+        video: {
+          facingMode: state.cameraFacingMode,
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
+      };
+      state.cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject = state.cameraStream;
+      modal.classList.remove('hidden');
+    } catch (err) {
+      alert('ไม่สามารถเข้าถึงกล้องได้: ' + err.message + '\n(โปรดอนุญาตให้สิทธิ์การใช้งานกล้องในเบราว์เซอร์)');
+    }
+  }
+
+  function stopCamera() {
+    if (state.cameraStream) {
+      state.cameraStream.getTracks().forEach(track => track.stop());
+      state.cameraStream = null;
+    }
+    modal.classList.add('hidden');
+  }
+
+  btnOpen.onclick = () => startCamera();
+  btnClose.onclick = () => stopCamera();
+  btnCancel.onclick = () => stopCamera();
+
+  btnSwitch.onclick = () => {
+    state.cameraFacingMode = state.cameraFacingMode === 'environment' ? 'user' : 'environment';
+    startCamera();
+  };
+
+  btnCapture.onclick = () => {
+    if (!video.videoWidth) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+    stopCamera();
+
+    // Add new photo page to app
+    const pageIndex = state.photos.length;
+    state.photos.push({
+      label: 'ภาพถ่ายสด (หน้าที่ ' + (pageIndex + 1) + ')',
+      file: dataUrl,
+      startNo: 1,
+      endNo: 26
+    });
+
+    switchPhoto(pageIndex, false);
+    alert('บันทึกรูปภาพใบเสร็จเรียบร้อยแล้ว!');
+  };
+}
+
 function setupEventListeners() {
+  // TR Search Bar
+  const btnFetchTR = document.getElementById('btnFetchTR');
+  const trInput = document.getElementById('trNumberInput');
+  
+  btnFetchTR.onclick = () => {
+    const trVal = trInput.value.trim();
+    if (!trVal) {
+      alert('กรุณากรอกเลข TR');
+      return;
+    }
+    const fullTR = state.defaultZipPrefix + '|' + trVal;
+    
+    // Simulate smart pull & match
+    alert('ค้นหาด้วยชุดรหัส: ' + fullTR + '\nระบบกำลังจับคู่ข้อมูลพัสดุทั้งใบเสร็จให้อัตโนมัติ');
+    renderItems();
+    updateStats();
+  };
+
+  trInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+      btnFetchTR.click();
+    }
+  });
+
   // Search
   document.getElementById('searchInput').addEventListener('input', (e) => {
     state.searchQuery = e.target.value.toLowerCase().trim();
@@ -423,7 +519,7 @@ function renderItems() {
     } else {
       excelSnippet = `
         <div class="text-slate-400 italic text-[11px] flex items-center gap-1 text-rose-500/80">
-          <i class="fa-solid fa-circle-exclamation"></i> ยังไม่มีในตาราง Excel
+          <i class="fa-solid fa-circle-exclamation"></i> ยังไม่มีในตาราง Track
         </div>
       `;
     }
@@ -476,7 +572,7 @@ function renderItems() {
 
         <div class="border-l border-slate-200 pl-3">
           <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1 mb-1">
-            <i class="fa-solid fa-file-excel text-emerald-600"></i> ข้อมูลจาก Excel (Track)
+            <i class="fa-solid fa-file-excel text-emerald-600"></i> ข้อมูลจาก Track
           </div>
           ${excelSnippet}
         </div>
@@ -505,7 +601,6 @@ function selectItem(item, scrollPhotoIntoPosition = true) {
 
   highlightItemNo(item.no);
 
-  // Approximate vertical scroll in image container
   if (scrollPhotoIntoPosition) {
     const leftContainer = document.getElementById('receiptContainer');
     const photoMeta = state.photos[item.photoIndex || 0];
@@ -596,7 +691,6 @@ function updateStats() {
     }
   });
 
-  document.getElementById('statTotalReceipt').textContent = totalReceipt;
   document.getElementById('statMatched').textContent = matchedCount;
   document.getElementById('statDelivered').textContent = deliveredCount;
 }

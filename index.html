@@ -46,7 +46,7 @@
 <body class="bg-slate-100 text-slate-800 h-screen flex flex-col overflow-hidden font-sans">
 
   <!-- TOP NAVBAR -->
-  <header class="bg-white border-b border-slate-200 px-4 py-2.5 flex items-center justify-between shadow-sm z-30 shrink-0">
+  <header class="bg-white border-b border-slate-200 px-4 py-2 flex items-center justify-between shadow-sm z-30 shrink-0">
     <div class="flex items-center gap-3">
       <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-red-500 to-rose-700 flex items-center justify-center text-white shadow-md shadow-red-200">
         <i class="fa-solid fa-receipt text-lg"></i>
@@ -56,42 +56,56 @@
           ระบบตรวจสอบและจับคู่ใบเสร็จ
           <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200">Side-by-Side</span>
         </h1>
-        <p class="text-xs text-slate-500">จับคู่เลขที่จาก Excel เรียงกำกับตามลำดับในใบเสร็จตัวจริง (Sync อัตโนมัติเมื่อเลื่อน)</p>
+        <p class="text-xs text-slate-500">จับคู่ข้อมูล Track กับใบเสร็จตัวจริง (Sync อัตโนมัติเมื่อเลื่อน)</p>
       </div>
     </div>
 
-    <!-- Actions & Stats -->
+    <!-- Actions & Quick TR Tracker -->
     <div class="flex items-center gap-2">
+
+      <!-- TR Fast Track Bar -->
+      <div class="flex items-center bg-slate-50 border border-slate-300 rounded-lg p-0.5 text-xs shadow-inner">
+        <div class="px-2 py-1 bg-slate-200 text-slate-700 font-mono font-bold rounded-l flex items-center gap-1">
+          <i class="fa-solid fa-location-arrow text-slate-500 text-[10px]"></i>
+          <span id="labelZipPrefix">(10501)</span>
+        </div>
+        <input type="text" id="trNumberInput" value="11476142" placeholder="เลข TR เช่น 11476142" 
+               class="w-28 px-2 py-1 text-xs font-mono font-semibold bg-transparent focus:outline-none text-slate-900">
+        <button id="btnFetchTR" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded font-medium flex items-center gap-1 transition shadow-xs">
+          <i class="fa-solid fa-magnifying-glass"></i>
+          <span>ค้นหา TR</span>
+        </button>
+      </div>
+
       <!-- Sync Mode Status -->
       <label class="cursor-pointer flex items-center gap-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-800 px-2.5 py-1.5 rounded-lg text-xs font-medium transition select-none">
         <input type="checkbox" id="syncScrollToggle" checked class="w-3.5 h-3.5 text-red-600 rounded focus:ring-red-500">
-        <span class="flex items-center gap-1"><i class="fa-solid fa-arrows-rotate text-red-600 text-[11px]"></i> Sync อัตโนมัติเมื่อเลื่อน</span>
+        <span class="flex items-center gap-1"><i class="fa-solid fa-arrows-rotate text-red-600 text-[11px]"></i> Sync อัตโนมัติ</span>
       </label>
 
-      <div class="hidden md:flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 text-xs text-slate-600">
-        <span>รายการใบเสร็จ: <strong id="statTotalReceipt" class="text-red-600 font-mono font-bold">0</strong></span>
-        <span class="text-slate-300">|</span>
-        <span>พบใน Excel: <strong id="statMatched" class="text-emerald-600 font-mono font-bold">0</strong></span>
-        <span class="text-slate-300">|</span>
-        <span>นำจ่ายสำเร็จ: <strong id="statDelivered" class="text-blue-600 font-mono font-bold">0</strong></span>
-      </div>
+      <!-- Camera Capture Button (ถ่ายรูปผ่านแอป) -->
+      <button id="btnOpenCamera" class="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all shadow-rose-200">
+        <i class="fa-solid fa-camera"></i>
+        <span>ถ่ายรูปใบเสร็จ</span>
+      </button>
 
-      <!-- Quick Upload Buttons -->
-      <label class="cursor-pointer px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all shadow-emerald-200">
+      <!-- File Image Upload (Alternative) -->
+      <label class="cursor-pointer px-2.5 py-1.5 bg-slate-700 hover:bg-slate-800 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all" title="เลือกไฟล์ภาพจากเครื่อง">
+        <i class="fa-regular fa-image"></i>
+        <span>เลือกรูป</span>
+        <input type="file" id="imageFileInput" accept="image/*" class="hidden">
+      </label>
+
+      <!-- Import Excel Button -->
+      <label class="cursor-pointer px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all shadow-emerald-200">
         <i class="fa-solid fa-file-excel"></i>
         <span>นำเข้า Excel</span>
         <input type="file" id="excelFileInput" accept=".xlsx, .xls, .csv" class="hidden">
       </label>
 
-      <label class="cursor-pointer px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all">
-        <i class="fa-solid fa-camera"></i>
-        <span>เพิ่มรูปใบเสร็จ</span>
-        <input type="file" id="imageFileInput" accept="image/*" class="hidden">
-      </label>
-
-      <button id="btnPasteModal" class="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all">
+      <button id="btnPasteModal" class="px-2.5 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 rounded-lg text-xs font-medium flex items-center gap-1 transition-all" title="วางตาราง">
         <i class="fa-regular fa-clipboard"></i>
-        <span>วางตาราง Excel</span>
+        <span>วางตาราง</span>
       </button>
 
       <button id="btnResetData" title="โหลดตัวอย่างตั้งต้น" class="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all">
@@ -141,7 +155,7 @@
 
       <!-- Left Panel Bottom Quick Guide -->
       <div class="bg-slate-800/80 px-3 py-1.5 text-[11px] text-slate-400 flex items-center justify-between border-t border-slate-700/60 z-10 shrink-0">
-        <span><i class="fa-regular fa-lightbulb text-amber-400"></i> เมื่อคุณเลื่อนดูรูปใบเสร็จ หรือกดปุ่มหน้า 1-4 ข้อมูลฝั่งขวาจะเลื่อนตามอัตโนมัติ</span>
+        <span><i class="fa-regular fa-lightbulb text-amber-400"></i> เมื่อเลื่อนดูรูปใบเสร็จ หรือกดปุ่มหน้า 1-4 ข้อมูลฝั่งขวาจะเลื่อนตามอัตโนมัติ</span>
         <span id="activeItemHint" class="text-red-300 font-mono">พร้อมใช้งาน</span>
       </div>
     </section>
@@ -161,7 +175,11 @@
             </span>
           </div>
 
-          <div class="flex items-center gap-2">
+          <div class="flex items-center gap-3">
+            <div class="text-xs text-slate-500">
+              พบใน Track: <strong id="statMatched" class="text-emerald-600 font-mono font-bold">26</strong> / 
+              นำจ่ายสำเร็จ: <strong id="statDelivered" class="text-blue-600 font-mono font-bold">25</strong>
+            </div>
             <a href="https://track.thailandpost.co.th/dashboard" target="_blank" class="text-xs text-red-600 hover:text-red-700 hover:underline flex items-center gap-1 font-medium">
               <i class="fa-solid fa-arrow-up-right-from-square"></i> track.thailandpost.co.th
             </a>
@@ -180,7 +198,7 @@
             <button data-filter="all" class="filter-btn px-2.5 py-1 rounded-md font-medium text-slate-700 bg-white shadow-xs transition">ทั้งหมด</button>
             <button data-filter="success" class="filter-btn px-2.5 py-1 rounded-md font-medium text-slate-500 hover:text-slate-800 transition">นำจ่ายสำเร็จ</button>
             <button data-filter="pending" class="filter-btn px-2.5 py-1 rounded-md font-medium text-slate-500 hover:text-slate-800 transition">ระหว่างทาง</button>
-            <button data-filter="missing" class="filter-btn px-2.5 py-1 rounded-md font-medium text-slate-500 hover:text-slate-800 transition">ไม่พบใน Excel</button>
+            <button data-filter="missing" class="filter-btn px-2.5 py-1 rounded-md font-medium text-slate-500 hover:text-slate-800 transition">ไม่พบใน Track</button>
           </div>
         </div>
       </div>
@@ -208,6 +226,41 @@
     </section>
 
   </main>
+
+  <!-- MODAL: CAMERA CAPTURE (ถ่ายรูปใบเสร็จผ่านแอป) -->
+  <div id="cameraModal" class="fixed inset-0 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4 z-50 hidden">
+    <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden flex flex-col">
+      <div class="bg-slate-900 text-white px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <i class="fa-solid fa-camera text-rose-500"></i>
+          <h3 class="font-bold text-sm">ถ่ายภาพใบเสร็จผ่านกล้อง</h3>
+        </div>
+        <button id="btnCloseCameraModal" class="text-slate-400 hover:text-white text-base"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="p-4 flex flex-col items-center bg-slate-950">
+        <!-- Video Stream Preview -->
+        <div class="relative w-full aspect-[3/4] max-h-[55vh] bg-black rounded-xl overflow-hidden border border-slate-700 flex items-center justify-center">
+          <video id="cameraVideo" autoplay playsinline class="w-full h-full object-contain"></video>
+          <!-- Receipt overlay guide -->
+          <div class="absolute inset-x-6 inset-y-4 border-2 border-dashed border-rose-500/60 rounded-lg pointer-events-none flex flex-col justify-between p-3">
+            <span class="text-[11px] text-rose-300 bg-black/60 px-2 py-0.5 rounded self-start">วางกระดาษใบเสร็จให้อยู่ในกรอบ</span>
+            <span class="text-[11px] text-rose-300 bg-black/60 px-2 py-0.5 rounded self-end">ระบบจะตรวจจับอัตโนมัติ</span>
+          </div>
+        </div>
+        <canvas id="cameraCanvas" class="hidden"></canvas>
+      </div>
+      <div class="bg-slate-900 p-4 border-t border-slate-800 flex items-center justify-around">
+        <button id="btnSwitchCamera" class="p-3 text-slate-300 hover:text-white rounded-full bg-slate-800 transition" title="สลับกล้องหน้า/หลัง">
+          <i class="fa-solid fa-camera-rotate text-lg"></i>
+        </button>
+        <!-- Capture Shutter Button -->
+        <button id="btnCapturePhoto" class="w-14 h-14 rounded-full bg-rose-600 hover:bg-rose-500 border-4 border-white flex items-center justify-center shadow-lg transition active:scale-95">
+          <i class="fa-solid fa-camera text-white text-xl"></i>
+        </button>
+        <button id="btnCancelCamera" class="px-4 py-2 text-xs text-slate-300 hover:text-white bg-slate-800 rounded-lg transition">ปิด</button>
+      </div>
+    </div>
+  </div>
 
   <!-- MODAL: PASTE EXCEL / RAW TEXT DATA -->
   <div id="pasteModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 hidden">
