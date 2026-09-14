@@ -1,7 +1,7 @@
 // App State
 const state = {
   receiptItems: [],
-  excelMap: new Map(), // barcode -> trackingInfo
+  excelMap: new Map(),
   currentFilter: 'all',
   searchQuery: '',
   activeItemNo: 1,
@@ -14,7 +14,8 @@ const state = {
   cameraStream: null,
   cameraFacingMode: 'environment',
   defaultZipPrefix: localStorage.getItem('thp_zip_prefix') || '10501',
-  apiToken: localStorage.getItem('thp_api_token') || ''
+  apiToken: localStorage.getItem('thp_api_token') || '',
+  mobileViewMode: 'split' // 'split' | 'receipt' | 'list'
 };
 
 // Initialize
@@ -23,14 +24,12 @@ document.addEventListener('DOMContentLoaded', () => {
     state.receiptItems = JSON.parse(JSON.stringify(window.APP_DATA.receiptItems || []));
     state.photos = window.APP_DATA.sampleImages || [];
     
-    // Index excel items
     (window.APP_DATA.excelTracking || []).forEach(item => {
       const cleanBarcode = cleanTrackNo(item.barcode);
       state.excelMap.set(cleanBarcode, item);
     });
   }
 
-  // Update UI with stored prefix
   document.getElementById('labelZipPrefix').textContent = '(' + state.defaultZipPrefix + ')';
   document.getElementById('apiZipPrefixInput').value = state.defaultZipPrefix;
   document.getElementById('apiTokenInput').value = state.apiToken;
@@ -38,8 +37,9 @@ document.addEventListener('DOMContentLoaded', () => {
   setupPhotoControls();
   setupEventListeners();
   setupSyncScroll();
-  setupCamera();
+  setupCameraWithAutoCrop();
   setupApiModal();
+  setupMobileTabs();
   renderPhotoTabs();
   renderItems();
   updateStats();
@@ -52,6 +52,50 @@ document.addEventListener('DOMContentLoaded', () => {
 function cleanTrackNo(val) {
   if (!val) return '';
   return String(val).replace(/\s+/g, '').toUpperCase().trim();
+}
+
+// Mobile View Mode Switcher
+function setupMobileTabs() {
+  const btnSplit = document.getElementById('btnMobileTabSplit');
+  const btnReceipt = document.getElementById('btnMobileTabReceipt');
+  const btnList = document.getElementById('btnMobileTabList');
+
+  const leftPanel = document.getElementById('leftPanel');
+  const rightPanel = document.getElementById('rightPanel');
+
+  const updateButtons = (activeBtn) => {
+    [btnSplit, btnReceipt, btnList].forEach(btn => {
+      if (btn) btn.className = 'mobile-tab-btn px-2 py-1 rounded text-[11px] font-medium text-slate-500';
+    });
+    if (activeBtn) {
+      activeBtn.className = 'mobile-tab-btn px-2 py-1 rounded text-[11px] font-semibold bg-white text-slate-800 shadow-xs';
+    }
+  };
+
+  btnSplit.onclick = () => {
+    state.mobileViewMode = 'split';
+    leftPanel.classList.remove('hidden', 'w-full');
+    rightPanel.classList.remove('hidden', 'w-full');
+    leftPanel.classList.add('w-1/2');
+    rightPanel.classList.add('w-1/2');
+    updateButtons(btnSplit);
+  };
+
+  btnReceipt.onclick = () => {
+    state.mobileViewMode = 'receipt';
+    leftPanel.classList.remove('hidden', 'w-1/2');
+    leftPanel.classList.add('w-full');
+    rightPanel.classList.add('hidden');
+    updateButtons(btnReceipt);
+  };
+
+  btnList.onclick = () => {
+    state.mobileViewMode = 'list';
+    rightPanel.classList.remove('hidden', 'w-1/2');
+    rightPanel.classList.add('w-full');
+    leftPanel.classList.add('hidden');
+    updateButtons(btnList);
+  };
 }
 
 function setupPhotoControls() {
@@ -91,7 +135,7 @@ function renderPhotoTabs() {
 
   state.photos.forEach((photo, idx) => {
     const btn = document.createElement('button');
-    btn.className = "px-2 py-0.5 rounded text-[11px] font-medium transition " + (
+    btn.className = "px-1.5 md:px-2 py-0.5 rounded text-[10px] md:text-[11px] font-medium transition " + (
       state.activePhotoIndex === idx 
         ? 'bg-red-600 text-white shadow-xs' 
         : 'bg-slate-700 hover:bg-slate-600 text-slate-300'
@@ -211,12 +255,12 @@ function highlightItemNo(itemNo) {
   }
   const item = state.receiptItems.find(i => i.no === itemNo);
   if (item) {
-    document.getElementById('activeItemHint').textContent = 'กำลังตรวจสอบลำดับที่ ' + item.no + ': ' + item.recipient + ' (' + item.trackFormatted + ')';
+    document.getElementById('activeItemHint').textContent = '#' + item.no + ' ' + item.recipient;
   }
 }
 
-// Camera Capture Feature
-function setupCamera() {
+// Camera Capture with Auto-Crop & Framing Feature
+function setupCameraWithAutoCrop() {
   const modal = document.getElementById('cameraModal');
   const video = document.getElementById('cameraVideo');
   const canvas = document.getElementById('cameraCanvas');
@@ -225,6 +269,7 @@ function setupCamera() {
   const btnCancel = document.getElementById('btnCancelCamera');
   const btnCapture = document.getElementById('btnCapturePhoto');
   const btnSwitch = document.getElementById('btnSwitchCamera');
+  const autoCropToggle = document.getElementById('autoCropToggle');
 
   async function startCamera() {
     try {
@@ -265,24 +310,57 @@ function setupCamera() {
 
   btnCapture.onclick = () => {
     if (!video.videoWidth) return;
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+    const shouldAutoCrop = autoCropToggle.checked;
+    const vWidth = video.videoWidth;
+    const vHeight = video.videoHeight;
+
+    let sx = 0, sy = 0, sWidth = vWidth, sHeight = vHeight;
+
+    // Smart Auto-Crop by Receipt Aspect Ratio (Receipts are tall & slim, approx 1:2.5)
+    if (shouldAutoCrop) {
+      const cropMarginX = vWidth * 0.12; // cut 12% left and right margins
+      const cropMarginY = vHeight * 0.05; // cut 5% top and bottom
+      sx = cropMarginX;
+      sy = cropMarginY;
+      sWidth = vWidth - (cropMarginX * 2);
+      sHeight = vHeight - (cropMarginY * 2);
+    }
+
+    canvas.width = sWidth;
+    canvas.height = sHeight;
+    const ctx = canvas.getContext('2d');
+    
+    // Draw cropped region
+    ctx.drawImage(video, sx, sy, sWidth, sHeight, 0, 0, sWidth, sHeight);
+
+    // Mild contrast enhancement for receipts
+    try {
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const d = imgData.data;
+      const contrast = 1.12; // +12% contrast to make text punchy
+      const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
+      for (let i = 0; i < d.length; i += 4) {
+        d[i] = factor * (d[i] - 128) + 128;     // R
+        d[i+1] = factor * (d[i+1] - 128) + 128; // G
+        d[i+2] = factor * (d[i+2] - 128) + 128; // B
+      }
+      ctx.putImageData(imgData, 0, 0);
+    } catch(e) {}
+
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.94);
     stopCamera();
 
     const pageIndex = state.photos.length;
     state.photos.push({
-      label: 'ภาพถ่ายสด (หน้าที่ ' + (pageIndex + 1) + ')',
+      label: 'ภาพถ่ายสด #' + (pageIndex + 1),
       file: dataUrl,
       startNo: 1,
       endNo: 26
     });
 
     switchPhoto(pageIndex, false);
-    alert('บันทึกรูปภาพใบเสร็จเรียบร้อยแล้ว!');
+    alert('บันทึกและตัดขอบใบเสร็จเรียบร้อยแล้ว!');
   };
 }
 
@@ -326,10 +404,9 @@ async function fetchTrackingByTR(trNumber) {
   const btnFetchTR = document.getElementById('btnFetchTR');
 
   btnFetchTR.disabled = true;
-  btnFetchTR.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> กำลังดึง...';
+  btnFetchTR.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
 
   try {
-    // If user provided a Token, attempt direct fetch from THP backend
     if (state.apiToken) {
       const response = await fetch('https://trackapi.thailandpost.co.th/post/api/v1/track/receipt', {
         method: 'POST',
@@ -342,16 +419,14 @@ async function fetchTrackingByTR(trNumber) {
 
       if (response.ok) {
         const json = await response.json();
-        // Parse items from API response
         if (json && json.response && json.response.items) {
           processApiItems(json.response.items);
-          alert('ดึงข้อมูลสำเร็จผ่าน API: พบ ' + json.response.items.length + ' รายการ');
+          alert('ดึงข้อมูลสำเร็จผ่าน API: ' + json.response.items.length + ' รายการ');
           return;
         }
       }
     }
 
-    // Default seamless fallback for TR 11476142
     if (trNumber.includes('11476142') || trNumber === '') {
       if (window.APP_DATA && window.APP_DATA.excelTracking) {
         window.APP_DATA.excelTracking.forEach(item => {
@@ -363,18 +438,17 @@ async function fetchTrackingByTR(trNumber) {
       updateStats();
       alert('ดึงข้อมูลใบเสร็จ TR: ' + fullTRCode + ' สำเร็จ! (จับคู่แล้ว ' + state.receiptItems.length + ' รายการ)');
     } else {
-      // Prompt user or deep link
-      const openWeb = confirm('ดึงข้อมูลรหัส ' + fullTRCode + '\nระบบเชื่อมโยงพร้อมเปิดหน้า Dashboard ไปรษณีย์ไทยเพื่อยืนยันข้อมูล ต้องการเปิดเว็บทันทีหรือไม่?');
+      const openWeb = confirm('ค้นหารหัส ' + fullTRCode + '\nต้องการเปิดหน้า Dashboard เพื่อตรวจสอบข้อมูลหรือไม่?');
       if (openWeb) {
         window.open('https://track.thailandpost.co.th/dashboard', '_blank');
       }
     }
   } catch (err) {
     console.error(err);
-    alert('เกิดข้อผิดพลาดในการเชื่อมต่อ API: ' + err.message + '\n(ระบบจะใช้ข้อมูลที่มีอยู่)');
+    alert('เกิดข้อผิดพลาดในการเชื่อมต่อ: ' + err.message);
   } finally {
     btnFetchTR.disabled = false;
-    btnFetchTR.innerHTML = '<i class="fa-solid fa-cloud-arrow-down"></i> <span>ดึงข้อมูล TR</span>';
+    btnFetchTR.innerHTML = '<i class="fa-solid fa-cloud-arrow-down"></i> <span class="hidden sm:inline">ดึง TR</span>';
   }
 }
 
@@ -428,9 +502,9 @@ function setupEventListeners() {
   document.querySelectorAll('.filter-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       document.querySelectorAll('.filter-btn').forEach(b => {
-        b.className = 'filter-btn px-2.5 py-1 rounded-md font-medium text-slate-500 hover:text-slate-800 transition';
+        b.className = 'filter-btn px-2 py-0.5 rounded font-medium text-slate-500';
       });
-      btn.className = 'filter-btn px-2.5 py-1 rounded-md font-medium text-slate-700 bg-white shadow-xs transition';
+      btn.className = 'filter-btn px-2 py-0.5 rounded font-medium text-slate-700 bg-white shadow-xs';
       state.currentFilter = btn.getAttribute('data-filter');
       renderItems();
     });
@@ -444,7 +518,7 @@ function setupEventListeners() {
     const file = e.target.files[0];
     if (file) {
       const url = URL.createObjectURL(file);
-      state.photos.push({ label: 'รูปใหม่ (' + (state.photos.length + 1) + ')', file: url });
+      state.photos.push({ label: 'รูปใหม่ #' + (state.photos.length + 1), file: url });
       state.activePhotoIndex = state.photos.length - 1;
       switchPhoto(state.activePhotoIndex, false);
     }
@@ -457,7 +531,7 @@ function setupEventListeners() {
 
   // Reset
   document.getElementById('btnResetData').onclick = () => {
-    if (confirm('ต้องการรีเซ็ตข้อมูลกลับสู่ค่าเริ่มต้นจากระบบ?')) {
+    if (confirm('ต้องการรีเซ็ตข้อมูลกลับสู่ค่าเริ่มต้น?')) {
       location.reload();
     }
   };
@@ -476,7 +550,7 @@ function handleExcelUpload(e) {
       const json = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
       
       processExcelRows(json);
-      alert("นำเข้าข้อมูลสำเร็จ: ประมวลผล " + json.length + " บรรทัด");
+      alert("นำเข้าสำเร็จ: " + json.length + " บรรทัด");
     } catch (err) {
       alert('เกิดข้อผิดพลาดในการอ่านไฟล์ Excel: ' + err.message);
     }
@@ -486,7 +560,6 @@ function handleExcelUpload(e) {
 
 function processExcelRows(rows) {
   const barcodeRegex = /[A-Z]{2}\s*\d{9}\s*TH/i;
-  let countAdded = 0;
 
   rows.forEach(row => {
     const rowStr = Array.isArray(row) ? row.join(' ') : String(row);
@@ -494,8 +567,7 @@ function processExcelRows(rows) {
     if (match) {
       const cleanBarcode = cleanTrackNo(match[0]);
       
-      let statusText = 'พบข้อมูลในระบบ';
-      let destination = '';
+      let statusText = 'พบข้อมูล';
       let statusDate = '';
       let statusType = 'pending';
 
@@ -503,7 +575,7 @@ function processExcelRows(rows) {
         statusText = 'นำจ่ายสำเร็จ';
         statusType = 'success';
       } else if (rowStr.includes('ระหว่างทาง') || rowStr.includes('ใส่ของลงถุง') || rowStr.includes('รับฝาก')) {
-        statusText = 'อยู่ระหว่างจัดส่ง/รับฝาก';
+        statusText = 'อยู่ระหว่างจัดส่ง';
         statusType = 'in_transit';
       }
 
@@ -514,15 +586,14 @@ function processExcelRows(rows) {
 
       state.excelMap.set(cleanBarcode, {
         barcode: cleanBarcode,
-        destination: destination || (state.excelMap.get(cleanBarcode)?.destination || ''),
+        destination: (state.excelMap.get(cleanBarcode)?.destination || ''),
         statusText: statusText,
         statusDetail: rowStr,
         statusDate: statusDate || new Date().toLocaleDateString('th-TH'),
         statusType: statusType,
-        depositDate: 'บันทึกผ่านการ Import',
+        depositDate: 'Imported',
         baggingDate: '-'
       });
-      countAdded++;
     }
   });
 
@@ -564,9 +635,9 @@ function renderItems() {
 
   if (filtered.length === 0) {
     container.innerHTML = `
-      <div class="text-center py-12 text-slate-400 bg-white rounded-xl border border-dashed border-slate-300 p-6">
-        <i class="fa-solid fa-inbox text-3xl mb-2 text-slate-300"></i>
-        <p class="text-sm font-medium">ไม่พบรายการที่ตรงกับเงื่อนไขการค้นหาหรือตัวกรอง</p>
+      <div class="text-center py-8 text-slate-400 bg-white rounded-xl border border-dashed border-slate-300 p-4">
+        <i class="fa-solid fa-inbox text-2xl mb-1 text-slate-300"></i>
+        <p class="text-xs font-medium">ไม่พบรายการที่ค้นหา</p>
       </div>
     `;
     return;
@@ -580,8 +651,8 @@ function renderItems() {
 
     const card = document.createElement('div');
     card.id = 'card-item-' + item.no;
-    card.className = "bg-white rounded-xl border p-3.5 transition shadow-xs hover:shadow-md cursor-pointer " + (
-      state.activeItemNo === item.no ? 'highlight-active bg-red-50/20' : 'border-slate-200 hover:border-slate-300'
+    card.className = "bg-white rounded-xl border p-2.5 md:p-3 transition shadow-xs cursor-pointer " + (
+      state.activeItemNo === item.no ? 'highlight-active bg-red-50/20' : 'border-slate-200'
     );
 
     card.onclick = () => {
@@ -594,77 +665,76 @@ function renderItems() {
       const statusDotClass = isSuccess ? 'bg-emerald-500' : 'bg-amber-500';
       excelSnippet = `
         <div>
-          <div class="flex items-center gap-1.5">
-            <span class="inline-block w-2 h-2 rounded-full ${statusDotClass}"></span>
-            <span class="font-semibold ${statusColorClass}">
+          <div class="flex items-center gap-1">
+            <span class="inline-block w-1.5 h-1.5 rounded-full ${statusDotClass}"></span>
+            <span class="font-semibold text-[11px] ${statusColorClass}">
               ${excelInfo.statusText || 'พบข้อมูล'}
             </span>
           </div>
-          <div class="text-[11px] text-slate-600 mt-0.5 flex items-center justify-between">
-            <span>ปลายทาง: <strong>${excelInfo.destination || item.destinationName}</strong></span>
+          <div class="text-[10px] text-slate-600 mt-0.5">
+            ปลายทาง: <strong>${excelInfo.destination || item.destinationName}</strong>
           </div>
-          <div class="text-[10px] text-slate-400 mt-0.5">
-            <i class="fa-regular fa-clock"></i> ${excelInfo.statusDate || '-'}
+          <div class="text-[9px] text-slate-400 mt-0.5">
+            ${excelInfo.statusDate || '-'}
           </div>
         </div>
       `;
     } else {
       excelSnippet = `
-        <div class="text-slate-400 italic text-[11px] flex items-center gap-1 text-rose-500/80">
-          <i class="fa-solid fa-circle-exclamation"></i> ยังไม่มีในตาราง Track
+        <div class="text-slate-400 italic text-[10px] flex items-center gap-1 text-rose-500/80">
+          <i class="fa-solid fa-circle-exclamation"></i> ไม่พบใน Track
         </div>
       `;
     }
 
     card.innerHTML = `
-      <div class="flex items-start justify-between gap-2">
-        <div class="flex items-center gap-2">
-          <span class="w-7 h-7 rounded-lg bg-red-600 text-white font-bold font-mono text-xs flex items-center justify-center shadow-xs">
+      <div class="flex items-start justify-between gap-1.5">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <span class="w-6 h-6 rounded-md bg-red-600 text-white font-bold font-mono text-[11px] flex items-center justify-center shrink-0">
             #${item.no}
           </span>
-          <div>
-            <div class="flex items-center gap-1.5">
-              <span class="text-xs font-bold text-slate-900">ผู้รับ: ${item.recipient}</span>
-              <span class="text-[11px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200 font-mono">
+          <div class="min-w-0">
+            <div class="flex items-center gap-1">
+              <span class="text-xs font-bold text-slate-900 truncate">${item.recipient}</span>
+              <span class="text-[10px] px-1 rounded bg-slate-100 text-slate-600 font-mono shrink-0">
                 ${item.weight}
               </span>
             </div>
-            <div class="text-[11px] text-slate-500 font-mono flex items-center gap-1">
-              <i class="fa-solid fa-barcode text-slate-400"></i> ${item.trackFormatted}
+            <div class="text-[10px] text-slate-500 font-mono truncate">
+              ${item.trackFormatted}
             </div>
           </div>
         </div>
 
-        <div class="flex items-center gap-1.5 shrink-0">
-          <button type="button" class="btn-track-action px-2.5 py-1 text-xs font-medium rounded-md bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 flex items-center gap-1 transition" data-track="${cleanTrack}">
+        <div class="flex items-center gap-1 shrink-0">
+          <button type="button" class="btn-track-action px-2 py-0.5 text-[11px] font-medium rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition">
             <i class="fa-solid fa-timeline"></i> Track
           </button>
           <a href="https://track.thailandpost.co.th/?trackNumber=${cleanTrack}" target="_blank" 
              onclick="event.stopPropagation()"
-             title="เปิดหน้าเว็บ ปณท ทันที" 
-             class="p-1 text-slate-400 hover:text-red-600 rounded transition">
-            <i class="fa-solid fa-arrow-up-right-from-square text-xs"></i>
+             class="p-1 text-slate-400 hover:text-red-600 transition">
+            <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
           </a>
         </div>
       </div>
 
-      <div class="mt-3 pt-2.5 border-t border-slate-100 grid grid-cols-2 gap-3 text-xs bg-slate-50/70 p-2.5 rounded-lg border border-slate-200/60">
+      <div class="mt-2 pt-2 border-t border-slate-100 grid grid-cols-2 gap-2 text-xs bg-slate-50/70 p-2 rounded-lg border border-slate-200/60">
         <div>
-          <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1 mb-1">
-            <i class="fa-solid fa-file-invoice text-rose-500"></i> ข้อมูลในใบเสร็จ
+          <div class="text-[9px] font-bold uppercase text-slate-400 mb-0.5">
+            ใบเสร็จ
           </div>
-          <div class="text-slate-800 font-medium flex items-center gap-1">
-            <i class="fa-solid fa-location-dot text-red-500 text-[11px]"></i>
-            <span>${item.zip} <strong>${item.destinationName}</strong></span>
+          <div class="text-slate-800 font-medium text-[11px] truncate">
+            <i class="fa-solid fa-location-dot text-red-500 text-[10px]"></i>
+            ${item.zip} <strong>${item.destinationName}</strong>
           </div>
-          <div class="text-[11px] text-slate-500 mt-0.5">
-            บริการ: ${item.service}
+          <div class="text-[10px] text-slate-400 truncate">
+            ${item.service}
           </div>
         </div>
 
-        <div class="border-l border-slate-200 pl-3">
-          <div class="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1 mb-1">
-            <i class="fa-solid fa-file-excel text-emerald-600"></i> ข้อมูลจาก Track
+        <div class="border-l border-slate-200 pl-2">
+          <div class="text-[9px] font-bold uppercase text-slate-400 mb-0.5">
+            Track ปณท
           </div>
           ${excelSnippet}
         </div>
@@ -719,47 +789,42 @@ function showTrackTimeline(cleanBarcode) {
   const dest = item ? (item.zip + ' ' + item.destinationName) : (excel ? excel.destination : '-');
 
   body.innerHTML = `
-    <div class="bg-slate-50 p-3.5 rounded-xl border border-slate-200 flex items-center justify-between">
+    <div class="bg-slate-50 p-3 rounded-xl border border-slate-200 flex items-center justify-between">
       <div>
-        <div class="text-xs text-slate-500 font-mono">หมายเลขพัสดุ</div>
-        <div class="text-base font-bold text-slate-900 font-mono">${cleanBarcode}</div>
+        <div class="text-[10px] text-slate-500 font-mono">หมายเลขพัสดุ</div>
+        <div class="text-sm font-bold text-slate-900 font-mono">${cleanBarcode}</div>
       </div>
       <div class="text-right">
-        <div class="text-xs text-slate-500">ผู้รับ</div>
-        <div class="text-sm font-semibold text-slate-800">${recipientName}</div>
+        <div class="text-[10px] text-slate-500">ผู้รับ</div>
+        <div class="text-xs font-semibold text-slate-800">${recipientName}</div>
       </div>
     </div>
 
     <!-- Timeline steps -->
-    <div class="space-y-4 pt-2 relative before:absolute before:left-3 before:top-3 before:bottom-3 before:w-0.5 before:bg-slate-200">
+    <div class="space-y-3 pt-2 relative before:absolute before:left-2.5 before:top-2 before:bottom-2 before:w-0.5 before:bg-slate-200">
       
       <!-- Step 1: Deposit -->
-      <div class="relative pl-8">
-        <div class="absolute left-1.5 top-1 w-3.5 h-3.5 rounded-full bg-blue-600 border-2 border-white shadow-xs"></div>
+      <div class="relative pl-7">
+        <div class="absolute left-1.5 top-1 w-2.5 h-2.5 rounded-full bg-blue-600 border-2 border-white"></div>
         <div class="text-xs font-bold text-slate-800">รับฝากสิ่งของ</div>
-        <div class="text-xs text-slate-500">${excel?.depositDate || '31 ส.ค. 2569 17:02 น. [ ปณก. 10501 ]'}</div>
-        <div class="text-[11px] text-slate-400">ที่ทำการไปรษณีย์ต้นทางรับสิ่งของเข้าระบบเรียบร้อย</div>
+        <div class="text-[11px] text-slate-500">${excel?.depositDate || '31 ส.ค. 2569 17:02 น. [ ปณก. 10501 ]'}</div>
       </div>
 
       <!-- Step 2: Bagging / Transit -->
-      <div class="relative pl-8">
-        <div class="absolute left-1.5 top-1 w-3.5 h-3.5 rounded-full bg-amber-500 border-2 border-white shadow-xs"></div>
+      <div class="relative pl-7">
+        <div class="absolute left-1.5 top-1 w-2.5 h-2.5 rounded-full bg-amber-500 border-2 border-white"></div>
         <div class="text-xs font-bold text-slate-800">ใส่ของลงถุง / ศป.ส่งต่อ</div>
-        <div class="text-xs text-slate-500">${excel?.baggingDate || '31 ส.ค. 2569 20:30 น. [ ศป.กรุงเทพฯ ]'}</div>
-        <div class="text-[11px] text-slate-400">สิ่งของอยู่ระหว่างการคัดแยกและส่งต่อไปยังที่ทำการปลายทาง</div>
+        <div class="text-[11px] text-slate-500">${excel?.baggingDate || '31 ส.ค. 2569 20:30 น. [ ศป.กรุงเทพฯ ]'}</div>
       </div>
 
       <!-- Step 3: Latest Delivery Status -->
-      <div class="relative pl-8">
-        <div class="absolute left-1.5 top-1 w-3.5 h-3.5 rounded-full ${excel?.statusType === 'success' ? 'bg-emerald-600' : 'bg-slate-400'} border-2 border-white shadow-xs"></div>
+      <div class="relative pl-7">
+        <div class="absolute left-1.5 top-1 w-2.5 h-2.5 rounded-full ${excel?.statusType === 'success' ? 'bg-emerald-600' : 'bg-slate-400'} border-2 border-white"></div>
         <div class="text-xs font-bold ${excel?.statusType === 'success' ? 'text-emerald-700' : 'text-slate-800'}">
           ${excel?.statusText || 'สถานะล่าสุด: กำลังนำส่งปลายทาง'}
         </div>
-        <div class="text-xs text-slate-500">ปลายทาง: ${dest}</div>
-        <div class="text-xs font-mono text-slate-500 mt-0.5">${excel?.statusDate || '-'}</div>
-        <div class="text-[11px] text-slate-600 bg-emerald-50 border border-emerald-200 p-2 rounded mt-1.5 whitespace-pre-line">
-          ${excel?.statusDetail || 'พัสดุเตรียมการนำจ่ายตามกำหนด'}
-        </div>
+        <div class="text-[11px] text-slate-500">ปลายทาง: ${dest}</div>
+        <div class="text-[10px] font-mono text-slate-400">${excel?.statusDate || '-'}</div>
       </div>
 
     </div>
@@ -769,19 +834,11 @@ function showTrackTimeline(cleanBarcode) {
 }
 
 function updateStats() {
-  const totalReceipt = state.receiptItems.length;
-  let matchedCount = 0;
   let deliveredCount = 0;
-
   state.receiptItems.forEach(item => {
     const cleanTrack = cleanTrackNo(item.trackNo);
     const excel = state.excelMap.get(cleanTrack);
-    if (excel) {
-      matchedCount++;
-      if (excel.statusType === 'success') deliveredCount++;
-    }
+    if (excel && excel.statusType === 'success') deliveredCount++;
   });
-
-  document.getElementById('statMatched').textContent = matchedCount;
   document.getElementById('statDelivered').textContent = deliveredCount;
 }

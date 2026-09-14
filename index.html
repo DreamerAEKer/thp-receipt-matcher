@@ -2,7 +2,7 @@
 <html lang="th">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>ระบบตรวจสอบและจับคู่ใบเสร็จ (Side-by-Side Matcher)</title>
   <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
@@ -29,7 +29,7 @@
     }
   </script>
   <style>
-    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-track { background: #f1f5f9; }
     ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
     ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
@@ -41,277 +41,309 @@
       box-shadow: 0 0 0 3px #EE2E24, 0 10px 25px -5px rgba(238, 46, 36, 0.3) !important;
       border-color: #EE2E24 !important;
     }
+    /* Mobile-specific adjustments */
+    @media (max-width: 768px) {
+      .desktop-only { display: none !important; }
+      .mobile-panel-hidden { display: none !important; }
+    }
   </style>
 </head>
-<body class="bg-slate-100 text-slate-800 h-screen flex flex-col overflow-hidden font-sans">
+<body class="bg-slate-100 text-slate-800 h-screen flex flex-col overflow-hidden font-sans select-none">
 
-  <!-- TOP NAVBAR -->
-  <header class="bg-white border-b border-slate-200 px-4 py-2 flex items-center justify-between shadow-sm z-30 shrink-0">
-    <div class="flex items-center gap-3">
-      <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-red-500 to-rose-700 flex items-center justify-center text-white shadow-md shadow-red-200">
-        <i class="fa-solid fa-receipt text-lg"></i>
+  <!-- TOP NAVBAR (Responsive: Compact on Mobile) -->
+  <header class="bg-white border-b border-slate-200 px-3 py-2 flex flex-col md:flex-row md:items-center justify-between shadow-sm z-30 shrink-0 gap-2">
+    
+    <!-- Top Row: Logo, Title & Mobile Tab Switcher -->
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 md:w-9 md:h-9 rounded-xl bg-gradient-to-br from-red-500 to-rose-700 flex items-center justify-center text-white shadow-md shadow-red-200 shrink-0">
+          <i class="fa-solid fa-receipt text-sm md:text-base"></i>
+        </div>
+        <div>
+          <h1 class="text-xs md:text-sm font-bold text-slate-800 leading-tight flex items-center gap-1.5">
+            ระบบตรวจสอบและจับคู่ใบเสร็จ
+            <span class="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-red-100 text-red-700 border border-red-200 hidden sm:inline">Side-by-Side</span>
+          </h1>
+          <p class="text-[10px] text-slate-500 hidden md:block">จับคู่ข้อมูล Track กับใบเสร็จตัวจริง (Sync อัตโนมัติเมื่อเลื่อน)</p>
+        </div>
       </div>
-      <div>
-        <h1 class="text-base font-bold text-slate-800 leading-tight flex items-center gap-2">
-          ระบบตรวจสอบและจับคู่ใบเสร็จ
-          <span class="text-xs font-semibold px-2 py-0.5 rounded-full bg-red-100 text-red-700 border border-red-200">Side-by-Side</span>
-        </h1>
-        <p class="text-xs text-slate-500">จับคู่ข้อมูล Track กับใบเสร็จตัวจริง (Sync อัตโนมัติเมื่อเลื่อน)</p>
+
+      <!-- Mobile View Mode Switcher (รูปใบเสร็จ vs รายการพัสดุ vs แยกซ้ายขวา) -->
+      <div class="flex md:hidden items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-xs">
+        <button id="btnMobileTabSplit" class="mobile-tab-btn px-2 py-1 rounded text-[11px] font-semibold bg-white text-slate-800 shadow-xs" title="แสดง 2 ฝั่ง">
+          <i class="fa-solid fa-columns"></i> คู่
+        </button>
+        <button id="btnMobileTabReceipt" class="mobile-tab-btn px-2 py-1 rounded text-[11px] font-medium text-slate-500" title="ดูรูปใบเสร็จ">
+          <i class="fa-regular fa-image"></i> รูป
+        </button>
+        <button id="btnMobileTabList" class="mobile-tab-btn px-2 py-1 rounded text-[11px] font-medium text-slate-500" title="ดูรายการ Track">
+          <i class="fa-solid fa-list-check"></i> ตาราง
+        </button>
       </div>
     </div>
 
-    <!-- Actions & Quick TR Tracker -->
-    <div class="flex items-center gap-2">
-
-      <!-- TR Fast Track Bar (Live API) -->
-      <div class="flex items-center bg-slate-50 border border-slate-300 rounded-lg p-0.5 text-xs shadow-inner">
-        <div class="px-2 py-1 bg-slate-200 text-slate-700 font-mono font-bold rounded-l flex items-center gap-1 cursor-pointer" id="btnEditZipPrefix" title="คลิกเพื่อเปลี่ยนรหัสต้นทาง">
-          <i class="fa-solid fa-location-arrow text-slate-500 text-[10px]"></i>
-          <span id="labelZipPrefix">(10501)</span>
+    <!-- Controls Row: TR Fast Bar & Buttons -->
+    <div class="flex items-center justify-between md:justify-end gap-1.5 overflow-x-auto pb-0.5 md:pb-0">
+      
+      <!-- TR Fast Track Bar -->
+      <div class="flex items-center bg-slate-50 border border-slate-300 rounded-lg p-0.5 text-xs shadow-inner shrink-0">
+        <div class="px-1.5 md:px-2 py-1 bg-slate-200 text-slate-700 font-mono font-bold rounded-l flex items-center gap-1 cursor-pointer" id="btnEditZipPrefix" title="แตะเพื่อเปลี่ยนรหัสต้นทาง">
+          <span id="labelZipPrefix" class="text-[11px] md:text-xs">(10501)</span>
         </div>
-        <input type="text" id="trNumberInput" value="11476142" placeholder="เลข TR เช่น 11476142" 
-               class="w-28 px-2 py-1 text-xs font-mono font-semibold bg-transparent focus:outline-none text-slate-900">
-        <button id="btnFetchTR" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded font-medium flex items-center gap-1 transition shadow-xs">
-          <i class="fa-solid fa-cloud-arrow-down"></i>
-          <span>ดึงข้อมูล TR</span>
+        <input type="text" id="trNumberInput" value="11476142" placeholder="เลข TR" 
+               class="w-20 md:w-28 px-1.5 md:px-2 py-1 text-[11px] md:text-xs font-mono font-semibold bg-transparent focus:outline-none text-slate-900">
+        <button id="btnFetchTR" class="bg-red-600 hover:bg-red-700 text-white px-2.5 md:px-3 py-1 rounded font-medium flex items-center gap-1 transition shadow-xs text-xs">
+          <i class="fa-solid fa-cloud-arrow-down text-[11px]"></i>
+          <span class="hidden sm:inline">ดึง TR</span>
         </button>
       </div>
 
-      <!-- API Settings Button -->
-      <button id="btnOpenApiModal" class="p-1.5 px-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg text-slate-700 text-xs font-medium flex items-center gap-1 transition" title="ตั้งค่าเชื่อมต่อ API">
-        <i class="fa-solid fa-key text-amber-500"></i>
-        <span class="hidden md:inline">API</span>
-      </button>
-
-      <!-- Sync Mode Status -->
-      <label class="cursor-pointer flex items-center gap-1.5 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-800 px-2.5 py-1.5 rounded-lg text-xs font-medium transition select-none">
-        <input type="checkbox" id="syncScrollToggle" checked class="w-3.5 h-3.5 text-red-600 rounded focus:ring-red-500">
-        <span class="flex items-center gap-1"><i class="fa-solid fa-arrows-rotate text-red-600 text-[11px]"></i> Sync</span>
+      <!-- Sync Toggle -->
+      <label class="cursor-pointer flex items-center gap-1 bg-rose-50 border border-rose-200 text-rose-800 px-2 py-1 md:py-1.5 rounded-lg text-[11px] md:text-xs font-medium transition select-none shrink-0" title="เลื่อนตามอัตโนมัติ">
+        <input type="checkbox" id="syncScrollToggle" checked class="w-3 h-3 text-red-600 rounded">
+        <span class="hidden sm:inline">Sync</span>
       </label>
 
-      <!-- Camera Capture Button (ถ่ายรูปผ่านแอป) -->
-      <button id="btnOpenCamera" class="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all shadow-rose-200">
+      <!-- Camera Capture Button (ถ่ายรูปสด + ตัดขอบ) -->
+      <button id="btnOpenCamera" class="px-2.5 md:px-3 py-1 md:py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] md:text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all shadow-rose-200 shrink-0">
         <i class="fa-solid fa-camera"></i>
-        <span>ถ่ายรูปใบเสร็จ</span>
+        <span>ถ่ายรูป</span>
       </button>
 
       <!-- File Image Upload (Alternative) -->
-      <label class="cursor-pointer px-2.5 py-1.5 bg-slate-700 hover:bg-slate-800 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all" title="เลือกไฟล์ภาพจากเครื่อง">
+      <label class="cursor-pointer p-1.5 md:px-2.5 md:py-1.5 bg-slate-700 hover:bg-slate-800 text-white rounded-lg text-xs font-medium flex items-center gap-1 shadow-sm transition-all shrink-0" title="เลือกไฟล์ภาพ">
         <i class="fa-regular fa-image"></i>
-        <span>เลือกรูป</span>
+        <span class="hidden md:inline">เลือกรูป</span>
         <input type="file" id="imageFileInput" accept="image/*" class="hidden">
       </label>
 
-      <!-- Import Excel Button -->
-      <label class="cursor-pointer px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all shadow-emerald-200" title="นำเข้า Excel สำรอง">
+      <!-- API Settings Button -->
+      <button id="btnOpenApiModal" class="p-1.5 md:px-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg text-slate-700 text-xs font-medium flex items-center gap-1 transition shrink-0" title="ตั้งค่า Token">
+        <i class="fa-solid fa-key text-amber-500"></i>
+      </button>
+
+      <!-- Excel Button -->
+      <label class="cursor-pointer p-1.5 md:px-2.5 md:py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium flex items-center gap-1 shadow-sm transition-all shrink-0" title="นำเข้า Excel">
         <i class="fa-solid fa-file-excel"></i>
-        <span>Excel</span>
+        <span class="hidden md:inline">Excel</span>
         <input type="file" id="excelFileInput" accept=".xlsx, .xls, .csv" class="hidden">
       </label>
 
-      <button id="btnResetData" title="โหลดตัวอย่างตั้งต้น" class="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all">
-        <i class="fa-solid fa-arrow-rotate-left"></i>
+      <button id="btnResetData" title="รีเซ็ตข้อมูล" class="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all shrink-0">
+        <i class="fa-solid fa-arrow-rotate-left text-xs"></i>
       </button>
     </div>
   </header>
 
-  <!-- MAIN SPLIT WORKSPACE -->
-  <main class="flex-1 flex overflow-hidden">
+  <!-- MAIN SPLIT WORKSPACE (Side-by-Side 50/50 on Desktop, Dynamic on Mobile) -->
+  <main id="mainWorkspace" class="flex-1 flex overflow-hidden flex-row">
     
-    <!-- LEFT PANEL: RECEIPT PHOTO VIEWER (50%) -->
-    <section class="w-1/2 flex flex-col border-r border-slate-300 bg-slate-900 relative">
+    <!-- LEFT PANEL: RECEIPT PHOTO VIEWER (50% on Desktop) -->
+    <section id="leftPanel" class="w-1/2 flex flex-col border-r border-slate-300 bg-slate-900 relative transition-all duration-150">
       
       <!-- Photo Toolbar -->
-      <div class="bg-slate-800/90 backdrop-blur text-white px-3 py-2 flex items-center justify-between text-xs border-b border-slate-700/60 z-20 shrink-0">
-        <div class="flex items-center gap-2">
-          <span class="font-medium text-slate-200 flex items-center gap-1.5">
-            <i class="fa-regular fa-image text-rose-400"></i> ใบเสร็จตัวจริง
+      <div class="bg-slate-800/95 text-white px-2.5 py-1.5 flex items-center justify-between text-xs border-b border-slate-700/60 z-20 shrink-0">
+        <div class="flex items-center gap-1.5 overflow-x-auto">
+          <span class="font-medium text-slate-200 flex items-center gap-1 text-[11px] shrink-0">
+            <i class="fa-regular fa-image text-rose-400"></i> <span class="hidden sm:inline">ใบเสร็จ</span>
           </span>
-          <div id="photoTabsContainer" class="flex items-center gap-1 ml-2"></div>
+          <div id="photoTabsContainer" class="flex items-center gap-1"></div>
         </div>
 
-        <div class="flex items-center gap-1">
-          <button id="btnZoomIn" class="p-1.5 px-2 bg-slate-700 hover:bg-slate-600 rounded text-slate-200 transition" title="ซูมเข้า">
+        <div class="flex items-center gap-1 shrink-0">
+          <button id="btnZoomIn" class="p-1 px-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-200 transition text-[11px]" title="ซูมเข้า">
             <i class="fa-solid fa-magnifying-glass-plus"></i>
           </button>
-          <button id="btnZoomOut" class="p-1.5 px-2 bg-slate-700 hover:bg-slate-600 rounded text-slate-200 transition" title="ซูมออก">
+          <button id="btnZoomOut" class="p-1 px-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-200 transition text-[11px]" title="ซูมออก">
             <i class="fa-solid fa-magnifying-glass-minus"></i>
           </button>
-          <button id="btnRotate" class="p-1.5 px-2 bg-slate-700 hover:bg-slate-600 rounded text-slate-200 transition" title="หมุน 90 องศา">
+          <button id="btnRotate" class="p-1 px-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-200 transition text-[11px]" title="หมุน 90 องศา">
             <i class="fa-solid fa-rotate-right"></i>
           </button>
-          <button id="btnResetZoom" class="p-1.5 px-2 bg-slate-700 hover:bg-slate-600 rounded text-slate-200 transition" title="รีเซ็ตขนาดปกติ">
+          <button id="btnResetZoom" class="p-1 px-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-200 transition text-[11px]" title="รีเซ็ต">
             <i class="fa-solid fa-expand"></i>
           </button>
-          <span id="zoomLevelIndicator" class="text-[11px] font-mono text-slate-400 px-1">100%</span>
+          <span id="zoomLevelIndicator" class="text-[10px] font-mono text-slate-400 px-0.5">100%</span>
         </div>
       </div>
 
       <!-- Receipt Canvas / Image Container -->
-      <div id="receiptContainer" class="flex-1 overflow-auto flex items-start justify-center p-4 select-none relative cursor-grab active:cursor-grabbing">
+      <div id="receiptContainer" class="flex-1 overflow-auto flex items-start justify-center p-2 select-none relative cursor-grab active:cursor-grabbing">
         <div id="imageWrapper" class="relative inline-block my-auto">
           <img id="receiptImage" src="media_1789374315239.jpg" alt="ใบเสร็จ ปณท" class="receipt-viewer-img max-w-full rounded shadow-2xl block border border-slate-700 pointer-events-auto">
         </div>
       </div>
 
       <!-- Left Panel Bottom Quick Guide -->
-      <div class="bg-slate-800/80 px-3 py-1.5 text-[11px] text-slate-400 flex items-center justify-between border-t border-slate-700/60 z-10 shrink-0">
-        <span><i class="fa-regular fa-lightbulb text-amber-400"></i> เมื่อเลื่อนดูรูปใบเสร็จ หรือกดปุ่มหน้า 1-4 ข้อมูลฝั่งขวาจะเลื่อนตามอัตโนมัติ</span>
-        <span id="activeItemHint" class="text-red-300 font-mono">พร้อมใช้งาน</span>
+      <div class="bg-slate-800/80 px-2.5 py-1 text-[10px] text-slate-400 flex items-center justify-between border-t border-slate-700/60 z-10 shrink-0">
+        <span class="truncate"><i class="fa-regular fa-lightbulb text-amber-400"></i> แพนหรือซูมเพื่อดูตัวเลข</span>
+        <span id="activeItemHint" class="text-red-300 font-mono shrink-0 ml-1">#1</span>
       </div>
     </section>
 
-    <!-- RIGHT PANEL: TRACKING & MATCHED DATA LIST (50%) -->
-    <section class="w-1/2 flex flex-col bg-slate-50 relative">
+    <!-- RIGHT PANEL: TRACKING & MATCHED DATA LIST (50% on Desktop) -->
+    <section id="rightPanel" class="w-1/2 flex flex-col bg-slate-50 relative transition-all duration-150">
       
       <!-- Right Header & Filters -->
-      <div class="bg-white px-4 py-2.5 border-b border-slate-200 flex flex-col gap-2 shrink-0 shadow-xs z-10">
+      <div class="bg-white px-3 py-2 border-b border-slate-200 flex flex-col gap-1.5 shrink-0 shadow-xs z-10">
         <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2">
-            <h2 class="text-sm font-bold text-slate-800 flex items-center gap-1.5">
-              <i class="fa-solid fa-list-check text-red-600"></i> รายการพัสดุ (เรียงกำกับตามลำดับในใบเสร็จ)
+          <div class="flex items-center gap-1.5">
+            <h2 class="text-xs md:text-sm font-bold text-slate-800 flex items-center gap-1">
+              <i class="fa-solid fa-list-check text-red-600"></i> รายการพัสดุ
             </h2>
-            <span id="countBadge" class="text-xs font-mono font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
+            <span id="countBadge" class="text-[10px] font-mono font-semibold px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
               26 รายการ
             </span>
           </div>
 
-          <div class="flex items-center gap-3">
-            <div class="text-xs text-slate-500">
-              พบใน Track: <strong id="statMatched" class="text-emerald-600 font-mono font-bold">26</strong> / 
-              นำจ่ายสำเร็จ: <strong id="statDelivered" class="text-blue-600 font-mono font-bold">25</strong>
-            </div>
-            <a href="https://track.thailandpost.co.th/dashboard" target="_blank" class="text-xs text-red-600 hover:text-red-700 hover:underline flex items-center gap-1 font-medium">
-              <i class="fa-solid fa-arrow-up-right-from-square"></i> track.thailandpost.co.th
+          <div class="flex items-center gap-2 text-[11px] text-slate-500">
+            <span>ส่งแล้ว: <strong id="statDelivered" class="text-emerald-600 font-mono font-bold">25</strong></span>
+            <a href="https://track.thailandpost.co.th/dashboard" target="_blank" class="text-red-600 hover:underline hidden sm:inline">
+              <i class="fa-solid fa-arrow-up-right-from-square"></i> ปณท
             </a>
           </div>
         </div>
 
-        <!-- Search and View Filter Tabs -->
-        <div class="flex items-center gap-2">
+        <!-- Search and Filter Tabs -->
+        <div class="flex items-center gap-1.5">
           <div class="relative flex-1">
-            <i class="fa-solid fa-magnifying-glass absolute left-3 top-2.5 text-slate-400 text-xs"></i>
-            <input type="text" id="searchInput" placeholder="ค้นหาเลขแทร็ก, ชื่อผู้รับ, ปลายทาง, หรือลำดับ..." 
-                   class="w-full pl-8 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 focus:bg-white transition">
+            <i class="fa-solid fa-magnifying-glass absolute left-2.5 top-2 text-slate-400 text-[11px]"></i>
+            <input type="text" id="searchInput" placeholder="ค้นหาเลขแทร็ก, ชื่อ, หรือปลายทาง..." 
+                   class="w-full pl-7 pr-2 py-1 text-xs bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-red-500 focus:bg-white transition">
           </div>
 
-          <div class="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-xs">
-            <button data-filter="all" class="filter-btn px-2.5 py-1 rounded-md font-medium text-slate-700 bg-white shadow-xs transition">ทั้งหมด</button>
-            <button data-filter="success" class="filter-btn px-2.5 py-1 rounded-md font-medium text-slate-500 hover:text-slate-800 transition">นำจ่ายสำเร็จ</button>
-            <button data-filter="pending" class="filter-btn px-2.5 py-1 rounded-md font-medium text-slate-500 hover:text-slate-800 transition">ระหว่างทาง</button>
-            <button data-filter="missing" class="filter-btn px-2.5 py-1 rounded-md font-medium text-slate-500 hover:text-slate-800 transition">ไม่พบใน Track</button>
+          <div class="flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-[11px] shrink-0">
+            <button data-filter="all" class="filter-btn px-2 py-0.5 rounded font-medium text-slate-700 bg-white shadow-xs">ทั้งหมด</button>
+            <button data-filter="success" class="filter-btn px-2 py-0.5 rounded font-medium text-slate-500">สำเร็จ</button>
+            <button data-filter="pending" class="filter-btn px-2 py-0.5 rounded font-medium text-slate-500 hidden sm:inline">ระหว่างทาง</button>
           </div>
         </div>
       </div>
 
       <!-- Items List Container (Scrollable) -->
-      <div id="itemsList" class="flex-1 overflow-y-auto p-3 space-y-2.5"></div>
+      <div id="itemsList" class="flex-1 overflow-y-auto p-2 md:p-3 space-y-2"></div>
 
       <!-- Bottom Summary Bar -->
-      <div class="bg-white border-t border-slate-200 px-4 py-2 flex items-center justify-between text-xs text-slate-600 shrink-0">
-        <div class="flex items-center gap-3">
-          <span class="flex items-center gap-1.5">
-            <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></span> นำจ่ายสำเร็จ
+      <div class="bg-white border-t border-slate-200 px-3 py-1.5 flex items-center justify-between text-[11px] text-slate-600 shrink-0">
+        <div class="flex items-center gap-2">
+          <span class="flex items-center gap-1">
+            <span class="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span> นำจ่ายสำเร็จ
           </span>
-          <span class="flex items-center gap-1.5">
-            <span class="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></span> ระหว่างทาง / ใส่ของลงถุง
-          </span>
-          <span class="flex items-center gap-1.5">
-            <span class="w-2.5 h-2.5 rounded-full bg-slate-300 inline-block"></span> ยังไม่มีข้อมูลแทร็ก
+          <span class="flex items-center gap-1">
+            <span class="w-2 h-2 rounded-full bg-amber-500 inline-block"></span> ระหว่างทาง
           </span>
         </div>
-        <div class="text-slate-400 font-mono text-[11px]">
-          เลื่อนฝั่งขวา รูปถ่ายจะสลับหน้าและเลื่อนตาม | เลื่อนฝั่งซ้าย ข้อมูลจะ Scroll ตามอัตโนมัติ
+        <div class="text-slate-400 font-mono text-[10px]">
+          Sync อัตโนมัติเมื่อเลื่อน
         </div>
       </div>
     </section>
 
   </main>
 
-  <!-- MODAL: API & AUTH SETTINGS (ตั้งค่าเชื่อมต่อตรงระบบ ปณท) -->
-  <div id="apiSettingsModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 hidden">
+  <!-- MODAL: CAMERA CAPTURE WITH AUTO-CROP (ถ่ายรูปใบเสร็จ + ตัดขอบอัตโนมัติ) -->
+  <div id="cameraModal" class="fixed inset-0 bg-slate-950/90 backdrop-blur-sm flex items-center justify-center p-2 z-50 hidden">
+    <div class="bg-slate-900 rounded-2xl shadow-2xl border border-slate-800 w-full max-w-md overflow-hidden flex flex-col max-h-[95vh]">
+      
+      <!-- Camera Top Bar -->
+      <div class="bg-slate-900 text-white px-4 py-2.5 flex items-center justify-between border-b border-slate-800">
+        <div class="flex items-center gap-2">
+          <i class="fa-solid fa-camera text-rose-500 text-sm"></i>
+          <h3 class="font-bold text-xs md:text-sm">กล้องถ่ายใบเสร็จ (พร้อมตัดขอบ)</h3>
+        </div>
+        <button id="btnCloseCameraModal" class="text-slate-400 hover:text-white text-base"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <!-- Viewfinder Area with Smart Receipt Guide -->
+      <div class="relative flex-1 bg-black flex items-center justify-center overflow-hidden p-2">
+        <video id="cameraVideo" autoplay playsinline class="w-full h-full object-cover rounded-xl"></video>
+        
+        <!-- Smart Receipt Edge Guide Frame -->
+        <div id="receiptFrameGuide" class="absolute inset-x-8 inset-y-6 border-2 border-rose-500/80 rounded-xl pointer-events-none flex flex-col justify-between p-3 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] bg-rose-600 text-white font-semibold px-2 py-0.5 rounded-full flex items-center gap-1 shadow">
+              <i class="fa-solid fa-crop-simple"></i> กรอบตัดขอบอัตโนมัติ
+            </span>
+            <span id="guideTorchIcon" class="text-amber-400 text-xs hidden"><i class="fa-solid fa-bolt"></i></span>
+          </div>
+          <div class="text-center">
+            <span class="text-[10px] text-white/90 bg-black/60 px-3 py-1 rounded-full backdrop-blur-xs">
+              วางกระดาษใบเสร็จให้เต็มกรอบสีแดง
+            </span>
+          </div>
+        </div>
+
+        <canvas id="cameraCanvas" class="hidden"></canvas>
+      </div>
+
+      <!-- Auto Crop Option Toggle & Actions -->
+      <div class="bg-slate-900 p-3 border-t border-slate-800 flex flex-col gap-2.5">
+        <div class="flex items-center justify-between text-xs text-slate-300 px-1">
+          <label class="cursor-pointer flex items-center gap-2 select-none">
+            <input type="checkbox" id="autoCropToggle" checked class="w-3.5 h-3.5 text-rose-600 rounded">
+            <span>ตัดขอบรอบนอกอัตโนมัติ (Auto-Crop)</span>
+          </label>
+          <button id="btnSwitchCamera" class="text-slate-300 hover:text-white text-xs flex items-center gap-1">
+            <i class="fa-solid fa-camera-rotate"></i> สลับกล้อง
+          </button>
+        </div>
+
+        <div class="flex items-center justify-around pt-1">
+          <button id="btnCancelCamera" class="px-4 py-2 text-xs text-slate-400 hover:text-white transition">ยกเลิก</button>
+          <!-- Big Shutter Button -->
+          <button id="btnCapturePhoto" class="w-14 h-14 rounded-full bg-rose-600 hover:bg-rose-500 border-4 border-white flex items-center justify-center shadow-lg transition active:scale-95">
+            <i class="fa-solid fa-camera text-white text-lg"></i>
+          </button>
+          <div class="w-12"></div> <!-- Spacer -->
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- MODAL: API & AUTH SETTINGS -->
+  <div id="apiSettingsModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 z-50 hidden">
     <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden">
       <div class="bg-slate-900 text-white px-4 py-3 flex items-center justify-between">
         <div class="flex items-center gap-2">
           <i class="fa-solid fa-plug-circle-bolt text-amber-400"></i>
-          <h3 class="font-bold text-sm">ตั้งค่าเชื่อมต่อ API โดยตรง (Track ปณท)</h3>
+          <h3 class="font-bold text-sm">ตั้งค่าเชื่อมต่อ API (Track ปณท)</h3>
         </div>
         <button id="btnCloseApiModal" class="text-slate-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
       </div>
-      <div class="p-5 space-y-4 text-xs">
+      <div class="p-4 space-y-3 text-xs">
         <div>
-          <label class="block font-semibold text-slate-700 mb-1">รหัสไปรษณีย์ต้นทางเริ่มต้น (Prefix):</label>
-          <input type="text" id="apiZipPrefixInput" value="10501" class="w-full p-2 border border-slate-300 rounded-lg font-mono text-xs focus:ring-2 focus:ring-red-500">
-          <p class="text-[11px] text-slate-400 mt-1">มักจะเป็นรหัสเดิมตลอด เช่น ปณก. 10501</p>
+          <label class="block font-semibold text-slate-700 mb-1">รหัสต้นทางเริ่มต้น (Prefix):</label>
+          <input type="text" id="apiZipPrefixInput" value="10501" class="w-full p-2 border border-slate-300 rounded-lg font-mono text-xs">
         </div>
-
         <div>
-          <label class="block font-semibold text-slate-700 mb-1">Authorization Token หรือ Cookie (จากหน้าเว็บ ปณท):</label>
-          <textarea id="apiTokenInput" rows="4" class="w-full p-2 border border-slate-300 rounded-lg font-mono text-[11px] focus:ring-2 focus:ring-red-500" placeholder="นำ Bearer token หรือ Session token มาวางที่นี่ (บันทึกในเครื่องอัตโนมัติ)"></textarea>
-          <p class="text-[11px] text-slate-500 mt-1">
-            <i class="fa-solid fa-circle-info text-blue-500"></i> สามารถก๊อปปี้จากแท็บ Network ในหน้า Dashboard ปณท มาวางเพียงครั้งเดียว เพื่อให้ระบบดึงข้อมูลอัตโนมัติ
-          </p>
-        </div>
-
-        <div class="bg-amber-50 border border-amber-200 p-3 rounded-lg text-amber-800 text-[11px] leading-relaxed">
-          <strong>หมายเหตุ:</strong> หากยังไม่ได้ใส่ Token เมื่อกดปุ่ม "ดึงข้อมูล TR" ระบบจะใช้ชุดข้อมูลจำลองที่เตรียมไว้ และมีปุ่มเปิดส่งรหัสไปยังหน้าเว็บ ปณท ทันที
+          <label class="block font-semibold text-slate-700 mb-1">Authorization Token หรือ Cookie:</label>
+          <textarea id="apiTokenInput" rows="3" class="w-full p-2 border border-slate-300 rounded-lg font-mono text-[11px]" placeholder="นำ Bearer token จาก Network มาวางที่นี่"></textarea>
         </div>
       </div>
-      <div class="bg-slate-50 px-4 py-3 border-t border-slate-200 flex items-center justify-end gap-2">
-        <button id="btnCancelApiModal" class="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-200 rounded-lg transition">ปิด</button>
-        <button id="btnSaveApiSettings" class="px-4 py-1.5 text-xs bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg shadow-sm transition">บันทึกการตั้งค่า</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- MODAL: CAMERA CAPTURE (ถ่ายรูปใบเสร็จผ่านแอป) -->
-  <div id="cameraModal" class="fixed inset-0 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4 z-50 hidden">
-    <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden flex flex-col">
-      <div class="bg-slate-900 text-white px-4 py-3 flex items-center justify-between">
-        <div class="flex items-center gap-2">
-          <i class="fa-solid fa-camera text-rose-500"></i>
-          <h3 class="font-bold text-sm">ถ่ายภาพใบเสร็จผ่านกล้อง</h3>
-        </div>
-        <button id="btnCloseCameraModal" class="text-slate-400 hover:text-white text-base"><i class="fa-solid fa-xmark"></i></button>
-      </div>
-      <div class="p-4 flex flex-col items-center bg-slate-950">
-        <div class="relative w-full aspect-[3/4] max-h-[55vh] bg-black rounded-xl overflow-hidden border border-slate-700 flex items-center justify-center">
-          <video id="cameraVideo" autoplay playsinline class="w-full h-full object-contain"></video>
-          <div class="absolute inset-x-6 inset-y-4 border-2 border-dashed border-rose-500/60 rounded-lg pointer-events-none flex flex-col justify-between p-3">
-            <span class="text-[11px] text-rose-300 bg-black/60 px-2 py-0.5 rounded self-start">วางกระดาษใบเสร็จให้อยู่ในกรอบ</span>
-            <span class="text-[11px] text-rose-300 bg-black/60 px-2 py-0.5 rounded self-end">ระบบจะตรวจจับอัตโนมัติ</span>
-          </div>
-        </div>
-        <canvas id="cameraCanvas" class="hidden"></canvas>
-      </div>
-      <div class="bg-slate-900 p-4 border-t border-slate-800 flex items-center justify-around">
-        <button id="btnSwitchCamera" class="p-3 text-slate-300 hover:text-white rounded-full bg-slate-800 transition" title="สลับกล้องหน้า/หลัง">
-          <i class="fa-solid fa-camera-rotate text-lg"></i>
-        </button>
-        <button id="btnCapturePhoto" class="w-14 h-14 rounded-full bg-rose-600 hover:bg-rose-500 border-4 border-white flex items-center justify-center shadow-lg transition active:scale-95">
-          <i class="fa-solid fa-camera text-white text-xl"></i>
-        </button>
-        <button id="btnCancelCamera" class="px-4 py-2 text-xs text-slate-300 hover:text-white bg-slate-800 rounded-lg transition">ปิด</button>
+      <div class="bg-slate-50 px-4 py-2.5 border-t border-slate-200 flex items-center justify-end gap-2">
+        <button id="btnCancelApiModal" class="px-3 py-1 text-xs text-slate-600">ปิด</button>
+        <button id="btnSaveApiSettings" class="px-4 py-1.5 text-xs bg-red-600 text-white rounded-lg font-medium">บันทึก</button>
       </div>
     </div>
   </div>
 
   <!-- MODAL: TRACK TIMELINE DETAIL -->
-  <div id="trackDetailModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 hidden">
-    <div class="bg-white rounded-xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden">
+  <div id="trackDetailModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 z-50 hidden">
+    <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden">
       <div class="bg-gradient-to-r from-red-600 to-rose-600 text-white px-4 py-3 flex items-center justify-between">
         <div class="flex items-center gap-2">
           <i class="fa-solid fa-truck-fast"></i>
-          <span class="font-bold text-sm tracking-wide">สถานะสิ่งของ (Track & Trace)</span>
+          <span class="font-bold text-xs md:text-sm">สถานะสิ่งของ (Track & Trace)</span>
         </div>
-        <button id="btnCloseTrackModal" class="text-white/80 hover:text-white"><i class="fa-solid fa-xmark text-base"></i></button>
+        <button id="btnCloseTrackModal" class="text-white/80 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
       </div>
-      <div id="trackModalBody" class="p-5 space-y-4 max-h-[70vh] overflow-y-auto"></div>
-      <div class="bg-slate-50 px-4 py-3 border-t border-slate-200 flex items-center justify-between">
-        <a id="btnExternalTrackDirect" href="#" target="_blank" class="text-xs text-red-600 hover:text-red-700 hover:underline flex items-center gap-1 font-semibold">
-          <i class="fa-solid fa-external-link-alt"></i> ตรวจสอบบนเว็บทางการ ปณท
+      <div id="trackModalBody" class="p-4 space-y-3 max-h-[70vh] overflow-y-auto"></div>
+      <div class="bg-slate-50 px-4 py-2.5 border-t border-slate-200 flex items-center justify-between">
+        <a id="btnExternalTrackDirect" href="#" target="_blank" class="text-xs text-red-600 hover:underline font-semibold">
+          <i class="fa-solid fa-external-link-alt"></i> ดูบนเว็บ ปณท
         </a>
-        <button id="btnCloseTrackModalBtn" class="px-3 py-1.5 text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium rounded-lg transition">ปิดหน้าต่าง</button>
+        <button id="btnCloseTrackModalBtn" class="px-3 py-1 text-xs bg-slate-200 text-slate-700 rounded-lg">ปิด</button>
       </div>
     </div>
   </div>
