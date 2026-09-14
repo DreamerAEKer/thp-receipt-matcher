@@ -480,35 +480,30 @@ function applyPerspectiveCrop() {
   const ratio = state.editorDisplayRatio || 1;
   const c = state.cropCorners;
 
-  // Scale corners back to original high-res camera dimensions
-  const tl = { x: c.tl.x / ratio, y: c.tl.y / ratio };
-  const tr = { x: c.tr.x / ratio, y: c.tr.y / ratio };
-  const br = { x: c.br.x / ratio, y: c.br.y / ratio };
-  const bl = { x: c.bl.x / ratio, y: c.bl.y / ratio };
+  // 1. Scale corners back to original high-res camera dimensions
+  const tl = { x: Math.max(0, c.tl.x / ratio), y: Math.max(0, c.tl.y / ratio) };
+  const tr = { x: Math.min(rawCanvas.width, c.tr.x / ratio), y: Math.max(0, c.tr.y / ratio) };
+  const br = { x: Math.min(rawCanvas.width, c.br.x / ratio), y: Math.min(rawCanvas.height, c.br.y / ratio) };
+  const bl = { x: Math.max(0, c.bl.x / ratio), y: Math.min(rawCanvas.height, c.bl.y / ratio) };
 
-  // Calculate target bounding size
-  const topWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y);
-  const bottomWidth = Math.hypot(br.x - bl.x, br.y - bl.y);
-  const leftHeight = Math.hypot(bl.x - tl.x, bl.y - tl.y);
-  const rightHeight = Math.hypot(br.x - tr.x, br.y - tr.y);
+  // 2. Calculate actual cropped bounding box accurately
+  const minX = Math.round(Math.min(tl.x, bl.x));
+  const maxX = Math.round(Math.max(tr.x, br.x));
+  const minY = Math.round(Math.min(tl.y, tr.y));
+  const maxY = Math.round(Math.max(bl.y, br.y));
 
-  const targetWidth = Math.round(Math.max(topWidth, bottomWidth));
-  const targetHeight = Math.round(Math.max(leftHeight, rightHeight));
+  const cropW = Math.max(20, maxX - minX);
+  const cropH = Math.max(20, maxY - minY);
 
   const outCanvas = document.createElement('canvas');
-  outCanvas.width = targetWidth;
-  outCanvas.height = targetHeight;
+  outCanvas.width = cropW;
+  outCanvas.height = cropH;
   const ctx = outCanvas.getContext('2d');
 
-  // Crop bounding box & draw
-  const minX = Math.max(0, Math.min(tl.x, bl.x));
-  const minY = Math.max(0, Math.min(tl.y, tr.y));
-  const cropW = Math.min(rawCanvas.width - minX, targetWidth);
-  const cropH = Math.min(rawCanvas.height - minY, targetHeight);
+  // 3. Draw EXACT cropped region from camera image
+  ctx.drawImage(rawCanvas, minX, minY, cropW, cropH, 0, 0, cropW, cropH);
 
-  ctx.drawImage(rawCanvas, minX, minY, cropW, cropH, 0, 0, targetWidth, targetHeight);
-
-  // Text enhancement (Adobe Scan Document Filter)
+  // 4. Contrast enhancement (Adobe Scan style document filter)
   try {
     const imgData = ctx.getImageData(0, 0, outCanvas.width, outCanvas.height);
     const d = imgData.data;
@@ -522,20 +517,36 @@ function applyPerspectiveCrop() {
     ctx.putImageData(imgData, 0, 0);
   } catch(e) {}
 
-  const dataUrl = outCanvas.toDataURL('image/jpeg', 0.94);
+  const dataUrl = outCanvas.toDataURL('image/jpeg', 0.92);
   document.getElementById('cornerCropModal').classList.add('hidden');
 
-  // Add into system photos
-  const pageIndex = state.photos.length;
-  state.photos.push({
-    label: 'สแกนใบเสร็จ #' + (pageIndex + 1),
+  // 5. Add as first tab and switch to it immediately
+  const newPhotoObj = {
+    label: 'ภาพที่ตัดขอบสด',
     file: dataUrl,
     startNo: 1,
-    endNo: 26
-  });
+    endNo: 26,
+    isUserUploaded: true
+  };
 
-  switchPhoto(pageIndex, false);
-  alert('ตัดขอบและปรับมุมใบเสร็จแบบ Lens เรียบร้อยแล้ว!');
+  state.photos.unshift(newPhotoObj);
+  state.activePhotoIndex = 0;
+
+  // Persist latest cropped receipt in localStorage
+  try {
+    localStorage.setItem('thp_latest_cropped_receipt', dataUrl);
+  } catch(e) {
+    console.warn('Image too large for localStorage, stored in current session');
+  }
+
+  // Set image directly
+  const imgEl = document.getElementById('receiptImage');
+  if (imgEl) {
+    imgEl.src = dataUrl;
+  }
+
+  renderPhotoTabs();
+  alert('บันทึกรูปภาพใบเสร็จตามกรอบที่ปรับเรียบร้อยแล้ว!');
 }
 
 // API Modal Settings
