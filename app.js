@@ -835,7 +835,7 @@ function renderItems() {
 
     const card = document.createElement('div');
     card.id = 'card-item-' + item.no;
-    card.className = "bg-white rounded-xl border p-2.5 md:p-3 transition shadow-xs cursor-pointer " + (
+    card.className = "bg-white rounded-xl border p-2.5 md:p-3.5 transition shadow-xs cursor-pointer " + (
       state.activeItemNo === item.no ? 'highlight-active bg-red-50/20' : 'border-slate-200'
     );
 
@@ -849,16 +849,16 @@ function renderItems() {
       const statusDotClass = isSuccess ? 'bg-emerald-500' : 'bg-amber-500';
       excelSnippet = `
         <div>
-          <div class="flex items-center gap-1">
-            <span class="inline-block w-1.5 h-1.5 rounded-full ${statusDotClass}"></span>
-            <span class="font-semibold text-[11px] ${statusColorClass}">
+          <div class="flex items-center gap-1.5">
+            <span class="inline-block w-2 h-2 rounded-full ${statusDotClass}"></span>
+            <span class="font-semibold text-[11px] md:text-xs ${statusColorClass}">
               ${excelInfo.statusText || 'พบข้อมูล'}
             </span>
           </div>
-          <div class="text-[10px] text-slate-600 mt-0.5">
+          <div class="text-[10px] md:text-xs text-slate-600 mt-0.5">
             ปลายทาง: <strong>${excelInfo.destination || item.destinationName}</strong>
           </div>
-          <div class="text-[9px] text-slate-400 mt-0.5">
+          <div class="text-[9px] md:text-[11px] text-slate-400 mt-0.5">
             ${excelInfo.statusDate || '-'}
           </div>
         </div>
@@ -872,52 +872,52 @@ function renderItems() {
     }
 
     card.innerHTML = `
-      <div class="flex items-start justify-between gap-1.5">
-        <div class="flex items-center gap-1.5 min-w-0">
-          <span class="w-6 h-6 rounded-md bg-red-600 text-white font-bold font-mono text-[11px] flex items-center justify-center shrink-0">
+      <div class="flex items-start justify-between gap-2">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="w-6 h-6 md:w-7 md:h-7 rounded-lg bg-red-600 text-white font-bold font-mono text-[11px] md:text-xs flex items-center justify-center shrink-0 shadow-xs">
             #${item.no}
           </span>
           <div class="min-w-0">
-            <div class="flex items-center gap-1">
-              <span class="text-xs font-bold text-slate-900 truncate">${item.recipient}</span>
-              <span class="text-[10px] px-1 rounded bg-slate-100 text-slate-600 font-mono shrink-0">
+            <div class="flex items-center gap-1.5">
+              <span class="text-xs md:text-sm font-bold text-slate-900 truncate">${item.recipient}</span>
+              <span class="text-[10px] md:text-[11px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-mono shrink-0">
                 ${item.weight}
               </span>
             </div>
-            <div class="text-[10px] text-slate-500 font-mono truncate">
+            <div class="text-[10px] md:text-xs text-slate-500 font-mono truncate">
               ${item.trackFormatted}
             </div>
           </div>
         </div>
 
-        <div class="flex items-center gap-1 shrink-0">
-          <button type="button" class="btn-track-action px-2 py-0.5 text-[11px] font-medium rounded bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition">
+        <div class="flex items-center gap-1.5 shrink-0">
+          <button type="button" class="btn-track-action px-2 md:px-2.5 py-0.5 md:py-1 text-[11px] md:text-xs font-medium rounded-lg bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition">
             <i class="fa-solid fa-timeline"></i> Track
           </button>
           <a href="https://track.thailandpost.co.th/?trackNumber=${cleanTrack}" target="_blank" 
              onclick="event.stopPropagation()"
-             class="p-1 text-slate-400 hover:text-red-600 transition">
-            <i class="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+             class="p-1 md:p-1.5 text-slate-400 hover:text-red-600 transition" title="เปิดหน้าเช็ค ปณท">
+            <i class="fa-solid fa-arrow-up-right-from-square text-[10px] md:text-xs"></i>
           </a>
         </div>
       </div>
 
-      <div class="mt-2 pt-2 border-t border-slate-100 grid grid-cols-2 gap-2 text-xs bg-slate-50/70 p-2 rounded-lg border border-slate-200/60">
+      <div class="mt-2.5 pt-2 border-t border-slate-100 grid grid-cols-2 gap-2 md:gap-3 text-xs bg-slate-50/70 p-2 md:p-2.5 rounded-lg border border-slate-200/60">
         <div>
-          <div class="text-[9px] font-bold uppercase text-slate-400 mb-0.5">
+          <div class="text-[9px] md:text-[10px] font-bold uppercase text-slate-400 mb-0.5">
             ใบเสร็จ
           </div>
-          <div class="text-slate-800 font-medium text-[11px] truncate">
-            <i class="fa-solid fa-location-dot text-red-500 text-[10px]"></i>
+          <div class="text-slate-800 font-medium text-[11px] md:text-xs truncate">
+            <i class="fa-solid fa-location-dot text-red-500 text-[10px] md:text-xs"></i>
             ${item.zip} <strong>${item.destinationName}</strong>
           </div>
-          <div class="text-[10px] text-slate-400 truncate">
+          <div class="text-[10px] md:text-[11px] text-slate-400 truncate">
             ${item.service}
           </div>
         </div>
 
-        <div class="border-l border-slate-200 pl-2">
-          <div class="text-[9px] font-bold uppercase text-slate-400 mb-0.5">
+        <div class="border-l border-slate-200 pl-2 md:pl-2.5">
+          <div class="text-[9px] md:text-[10px] font-bold uppercase text-slate-400 mb-0.5">
             Track ปณท
           </div>
           ${excelSnippet}
