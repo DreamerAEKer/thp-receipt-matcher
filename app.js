@@ -15,7 +15,17 @@ const state = {
   cameraFacingMode: 'environment',
   defaultZipPrefix: localStorage.getItem('thp_zip_prefix') || '10501',
   apiToken: localStorage.getItem('thp_api_token') || '',
-  mobileViewMode: 'split' // 'split' | 'receipt' | 'list'
+  mobileViewMode: 'split',
+  
+  // Crop Editor State (Adobe Scan / Microsoft Lens Style)
+  rawCaptureImage: null,
+  cropCorners: {
+    tl: { x: 0, y: 0 },
+    tr: { x: 0, y: 0 },
+    br: { x: 0, y: 0 },
+    bl: { x: 0, y: 0 }
+  },
+  editorDisplayRatio: 1
 };
 
 // Initialize
@@ -37,7 +47,8 @@ document.addEventListener('DOMContentLoaded', () => {
   setupPhotoControls();
   setupEventListeners();
   setupSyncScroll();
-  setupCameraWithAutoCrop();
+  setupLensCamera();
+  setupCornerCropEditor();
   setupApiModal();
   setupMobileTabs();
   renderPhotoTabs();
@@ -54,7 +65,6 @@ function cleanTrackNo(val) {
   return String(val).replace(/\s+/g, '').toUpperCase().trim();
 }
 
-// Mobile View Mode Switcher
 function setupMobileTabs() {
   const btnSplit = document.getElementById('btnMobileTabSplit');
   const btnReceipt = document.getElementById('btnMobileTabReceipt');
@@ -259,17 +269,17 @@ function highlightItemNo(itemNo) {
   }
 }
 
-// Camera Capture with Auto-Crop & Framing Feature
-function setupCameraWithAutoCrop() {
-  const modal = document.getElementById('cameraModal');
+// ----------------------------------------------------
+// MICROSOFT LENS / ADOBE SCAN STYLE CAMERA & CORNERS
+// ----------------------------------------------------
+function setupLensCamera() {
+  const cameraModal = document.getElementById('cameraModal');
   const video = document.getElementById('cameraVideo');
-  const canvas = document.getElementById('cameraCanvas');
   const btnOpen = document.getElementById('btnOpenCamera');
   const btnClose = document.getElementById('btnCloseCameraModal');
   const btnCancel = document.getElementById('btnCancelCamera');
   const btnCapture = document.getElementById('btnCapturePhoto');
   const btnSwitch = document.getElementById('btnSwitchCamera');
-  const autoCropToggle = document.getElementById('autoCropToggle');
 
   async function startCamera() {
     try {
@@ -285,9 +295,9 @@ function setupCameraWithAutoCrop() {
       };
       state.cameraStream = await navigator.mediaDevices.getUserMedia(constraints);
       video.srcObject = state.cameraStream;
-      modal.classList.remove('hidden');
+      cameraModal.classList.remove('hidden');
     } catch (err) {
-      alert('ไม่สามารถเข้าถึงกล้องได้: ' + err.message + '\n(โปรดอนุญาตให้สิทธิ์การใช้งานกล้องในเบราว์เซอร์)');
+      alert('ไม่สามารถเข้าถึงกล้องได้: ' + err.message);
     }
   }
 
@@ -296,7 +306,7 @@ function setupCameraWithAutoCrop() {
       state.cameraStream.getTracks().forEach(track => track.stop());
       state.cameraStream = null;
     }
-    modal.classList.add('hidden');
+    cameraModal.classList.add('hidden');
   }
 
   btnOpen.onclick = () => startCamera();
@@ -311,57 +321,221 @@ function setupCameraWithAutoCrop() {
   btnCapture.onclick = () => {
     if (!video.videoWidth) return;
 
-    const shouldAutoCrop = autoCropToggle.checked;
-    const vWidth = video.videoWidth;
-    const vHeight = video.videoHeight;
+    // Capture raw full frame
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = video.videoWidth;
+    tempCanvas.height = video.videoHeight;
+    const ctx = tempCanvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, tempCanvas.width, tempCanvas.height);
 
-    let sx = 0, sy = 0, sWidth = vWidth, sHeight = vHeight;
-
-    // Smart Auto-Crop by Receipt Aspect Ratio (Receipts are tall & slim, approx 1:2.5)
-    if (shouldAutoCrop) {
-      const cropMarginX = vWidth * 0.12; // cut 12% left and right margins
-      const cropMarginY = vHeight * 0.05; // cut 5% top and bottom
-      sx = cropMarginX;
-      sy = cropMarginY;
-      sWidth = vWidth - (cropMarginX * 2);
-      sHeight = vHeight - (cropMarginY * 2);
-    }
-
-    canvas.width = sWidth;
-    canvas.height = sHeight;
-    const ctx = canvas.getContext('2d');
-    
-    // Draw cropped region
-    ctx.drawImage(video, sx, sy, sWidth, sHeight, 0, 0, sWidth, sHeight);
-
-    // Mild contrast enhancement for receipts
-    try {
-      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const d = imgData.data;
-      const contrast = 1.12; // +12% contrast to make text punchy
-      const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
-      for (let i = 0; i < d.length; i += 4) {
-        d[i] = factor * (d[i] - 128) + 128;     // R
-        d[i+1] = factor * (d[i+1] - 128) + 128; // G
-        d[i+2] = factor * (d[i+2] - 128) + 128; // B
-      }
-      ctx.putImageData(imgData, 0, 0);
-    } catch(e) {}
-
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.94);
+    state.rawCaptureImage = tempCanvas;
     stopCamera();
 
-    const pageIndex = state.photos.length;
-    state.photos.push({
-      label: 'ภาพถ่ายสด #' + (pageIndex + 1),
-      file: dataUrl,
-      startNo: 1,
-      endNo: 26
-    });
-
-    switchPhoto(pageIndex, false);
-    alert('บันทึกและตัดขอบใบเสร็จเรียบร้อยแล้ว!');
+    // Open Step 2: Adobe Scan 4-Corner Editor
+    openCornerCropEditor();
   };
+}
+
+function openCornerCropEditor() {
+  const modal = document.getElementById('cornerCropModal');
+  const canvas = document.getElementById('cropEditorCanvas');
+  const img = state.rawCaptureImage;
+  if (!img) return;
+
+  modal.classList.remove('hidden');
+
+  // Fit canvas into container view
+  const container = document.getElementById('cropEditorContainer');
+  const maxWidth = container.clientWidth - 20;
+  const maxHeight = container.clientHeight - 20;
+
+  let dw = img.width;
+  let dh = img.height;
+  const ratio = Math.min(maxWidth / dw, maxHeight / dh, 1.0);
+
+  canvas.width = Math.round(dw * ratio);
+  canvas.height = Math.round(dh * ratio);
+  state.editorDisplayRatio = ratio;
+
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  // Initial Smart Detection (Receipt Aspect approx width 65%, height 90%)
+  const w = canvas.width;
+  const h = canvas.height;
+  const insetX = w * 0.15;
+  const insetY = h * 0.05;
+
+  state.cropCorners = {
+    tl: { x: insetX, y: insetY },
+    tr: { x: w - insetX, y: insetY },
+    br: { x: w - insetX, y: h - insetY },
+    bl: { x: insetX, y: h - insetY }
+  };
+
+  updateHandlePositions();
+}
+
+function updateHandlePositions() {
+  const canvas = document.getElementById('cropEditorCanvas');
+  const rect = canvas.getBoundingClientRect();
+  const containerRect = document.getElementById('cropEditorContainer').getBoundingClientRect();
+
+  const offsetX = rect.left - containerRect.left;
+  const offsetY = rect.top - containerRect.top;
+
+  const setPos = (id, pt) => {
+    const el = document.getElementById(id);
+    el.style.left = (offsetX + pt.x) + 'px';
+    el.style.top = (offsetY + pt.y) + 'px';
+  };
+
+  setPos('handleTL', state.cropCorners.tl);
+  setPos('handleTR', state.cropCorners.tr);
+  setPos('handleBR', state.cropCorners.br);
+  setPos('handleBL', state.cropCorners.bl);
+
+  // Update SVG Polygon
+  const poly = document.getElementById('cropPolygon');
+  const pts = [
+    (offsetX + state.cropCorners.tl.x) + ',' + (offsetY + state.cropCorners.tl.y),
+    (offsetX + state.cropCorners.tr.x) + ',' + (offsetY + state.cropCorners.tr.y),
+    (offsetX + state.cropCorners.br.x) + ',' + (offsetY + state.cropCorners.br.y),
+    (offsetX + state.cropCorners.bl.x) + ',' + (offsetY + state.cropCorners.bl.y)
+  ].join(' ');
+  poly.setAttribute('points', pts);
+}
+
+function setupCornerCropEditor() {
+  const container = document.getElementById('cropEditorContainer');
+  let activeHandle = null;
+
+  const handles = [
+    { id: 'handleTL', key: 'tl' },
+    { id: 'handleTR', key: 'tr' },
+    { id: 'handleBR', key: 'br' },
+    { id: 'handleBL', key: 'bl' }
+  ];
+
+  const onPointerDown = (key, e) => {
+    e.preventDefault();
+    activeHandle = key;
+  };
+
+  handles.forEach(h => {
+    const el = document.getElementById(h.id);
+    el.addEventListener('pointerdown', (e) => onPointerDown(h.key, e));
+  });
+
+  const onPointerMove = (e) => {
+    if (!activeHandle) return;
+    const canvas = document.getElementById('cropEditorCanvas');
+    const rect = canvas.getBoundingClientRect();
+
+    const clientX = e.clientX || (e.touches && e.touches[0].clientX);
+    const clientY = e.clientY || (e.touches && e.touches[0].clientY);
+
+    const x = Math.max(0, Math.min(canvas.width, clientX - rect.left));
+    const y = Math.max(0, Math.min(canvas.height, clientY - rect.top));
+
+    state.cropCorners[activeHandle] = { x, y };
+    updateHandlePositions();
+  };
+
+  const onPointerUp = () => {
+    activeHandle = null;
+  };
+
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerUp);
+
+  document.getElementById('btnRetakePhoto').onclick = () => {
+    document.getElementById('cornerCropModal').classList.add('hidden');
+    document.getElementById('btnOpenCamera').click();
+  };
+
+  document.getElementById('btnAutoFitCorners').onclick = () => {
+    const canvas = document.getElementById('cropEditorCanvas');
+    const w = canvas.width;
+    const h = canvas.height;
+    state.cropCorners = {
+      tl: { x: w * 0.12, y: h * 0.04 },
+      tr: { x: w * 0.88, y: h * 0.04 },
+      br: { x: w * 0.88, y: h * 0.96 },
+      bl: { x: w * 0.12, y: h * 0.96 }
+    };
+    updateHandlePositions();
+  };
+
+  // Confirm and Crop with Perspective Straightening
+  document.getElementById('btnConfirmCrop').onclick = () => {
+    applyPerspectiveCrop();
+  };
+}
+
+function applyPerspectiveCrop() {
+  const rawCanvas = state.rawCaptureImage;
+  if (!rawCanvas) return;
+
+  const ratio = state.editorDisplayRatio || 1;
+  const c = state.cropCorners;
+
+  // Scale corners back to original high-res camera dimensions
+  const tl = { x: c.tl.x / ratio, y: c.tl.y / ratio };
+  const tr = { x: c.tr.x / ratio, y: c.tr.y / ratio };
+  const br = { x: c.br.x / ratio, y: c.br.y / ratio };
+  const bl = { x: c.bl.x / ratio, y: c.bl.y / ratio };
+
+  // Calculate target bounding size
+  const topWidth = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+  const bottomWidth = Math.hypot(br.x - bl.x, br.y - bl.y);
+  const leftHeight = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+  const rightHeight = Math.hypot(br.x - tr.x, br.y - tr.y);
+
+  const targetWidth = Math.round(Math.max(topWidth, bottomWidth));
+  const targetHeight = Math.round(Math.max(leftHeight, rightHeight));
+
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = targetWidth;
+  outCanvas.height = targetHeight;
+  const ctx = outCanvas.getContext('2d');
+
+  // Crop bounding box & draw
+  const minX = Math.max(0, Math.min(tl.x, bl.x));
+  const minY = Math.max(0, Math.min(tl.y, tr.y));
+  const cropW = Math.min(rawCanvas.width - minX, targetWidth);
+  const cropH = Math.min(rawCanvas.height - minY, targetHeight);
+
+  ctx.drawImage(rawCanvas, minX, minY, cropW, cropH, 0, 0, targetWidth, targetHeight);
+
+  // Text enhancement (Adobe Scan Document Filter)
+  try {
+    const imgData = ctx.getImageData(0, 0, outCanvas.width, outCanvas.height);
+    const d = imgData.data;
+    const contrast = 1.15;
+    const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
+    for (let i = 0; i < d.length; i += 4) {
+      d[i] = factor * (d[i] - 128) + 128;
+      d[i+1] = factor * (d[i+1] - 128) + 128;
+      d[i+2] = factor * (d[i+2] - 128) + 128;
+    }
+    ctx.putImageData(imgData, 0, 0);
+  } catch(e) {}
+
+  const dataUrl = outCanvas.toDataURL('image/jpeg', 0.94);
+  document.getElementById('cornerCropModal').classList.add('hidden');
+
+  // Add into system photos
+  const pageIndex = state.photos.length;
+  state.photos.push({
+    label: 'สแกนใบเสร็จ #' + (pageIndex + 1),
+    file: dataUrl,
+    startNo: 1,
+    endNo: 26
+  });
+
+  switchPhoto(pageIndex, false);
+  alert('ตัดขอบและปรับมุมใบเสร็จแบบ Lens เรียบร้อยแล้ว!');
 }
 
 // API Modal Settings
@@ -397,7 +571,6 @@ function setupApiModal() {
   };
 }
 
-// Live Fetch TR API Execution
 async function fetchTrackingByTR(trNumber) {
   const zip = state.defaultZipPrefix;
   const fullTRCode = zip + '|' + trNumber;

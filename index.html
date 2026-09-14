@@ -41,16 +41,30 @@
       box-shadow: 0 0 0 3px #EE2E24, 0 10px 25px -5px rgba(238, 46, 36, 0.3) !important;
       border-color: #EE2E24 !important;
     }
-    /* Mobile-specific adjustments */
-    @media (max-width: 768px) {
-      .desktop-only { display: none !important; }
-      .mobile-panel-hidden { display: none !important; }
+    /* Adobe Scan Corner Handles */
+    .crop-handle {
+      width: 28px;
+      height: 28px;
+      border: 3px solid #EE2E24;
+      background: white;
+      border-radius: 50%;
+      position: absolute;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 2px 10px rgba(0,0,0,0.5);
+      touch-action: none;
+      cursor: grab;
+      z-index: 40;
+    }
+    .crop-handle:active {
+      cursor: grabbing;
+      background: #EE2E24;
+      transform: translate(-50%, -50%) scale(1.2);
     }
   </style>
 </head>
 <body class="bg-slate-100 text-slate-800 h-screen flex flex-col overflow-hidden font-sans select-none">
 
-  <!-- TOP NAVBAR (Responsive: Compact on Mobile) -->
+  <!-- TOP NAVBAR -->
   <header class="bg-white border-b border-slate-200 px-3 py-2 flex flex-col md:flex-row md:items-center justify-between shadow-sm z-30 shrink-0 gap-2">
     
     <!-- Top Row: Logo, Title & Mobile Tab Switcher -->
@@ -68,7 +82,7 @@
         </div>
       </div>
 
-      <!-- Mobile View Mode Switcher (รูปใบเสร็จ vs รายการพัสดุ vs แยกซ้ายขวา) -->
+      <!-- Mobile View Mode Switcher -->
       <div class="flex md:hidden items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200 text-xs">
         <button id="btnMobileTabSplit" class="mobile-tab-btn px-2 py-1 rounded text-[11px] font-semibold bg-white text-slate-800 shadow-xs" title="แสดง 2 ฝั่ง">
           <i class="fa-solid fa-columns"></i> คู่
@@ -104,10 +118,10 @@
         <span class="hidden sm:inline">Sync</span>
       </label>
 
-      <!-- Camera Capture Button (ถ่ายรูปสด + ตัดขอบ) -->
+      <!-- Camera Capture Button (แบบ Adobe Scan / Lens) -->
       <button id="btnOpenCamera" class="px-2.5 md:px-3 py-1 md:py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-[11px] md:text-xs font-medium flex items-center gap-1.5 shadow-sm transition-all shadow-rose-200 shrink-0">
         <i class="fa-solid fa-camera"></i>
-        <span>ถ่ายรูป</span>
+        <span>สแกนใบเสร็จ</span>
       </button>
 
       <!-- File Image Upload (Alternative) -->
@@ -135,7 +149,7 @@
     </div>
   </header>
 
-  <!-- MAIN SPLIT WORKSPACE (Side-by-Side 50/50 on Desktop, Dynamic on Mobile) -->
+  <!-- MAIN SPLIT WORKSPACE -->
   <main id="mainWorkspace" class="flex-1 flex overflow-hidden flex-row">
     
     <!-- LEFT PANEL: RECEIPT PHOTO VIEWER (50% on Desktop) -->
@@ -241,61 +255,88 @@
 
   </main>
 
-  <!-- MODAL: CAMERA CAPTURE WITH AUTO-CROP (ถ่ายรูปใบเสร็จ + ตัดขอบอัตโนมัติ) -->
-  <div id="cameraModal" class="fixed inset-0 bg-slate-950/90 backdrop-blur-sm flex items-center justify-center p-2 z-50 hidden">
-    <div class="bg-slate-900 rounded-2xl shadow-2xl border border-slate-800 w-full max-w-md overflow-hidden flex flex-col max-h-[95vh]">
+  <!-- STEP 1: CAMERA SCANNER (Live Edge Detection Overlay) -->
+  <div id="cameraModal" class="fixed inset-0 bg-slate-950 flex items-center justify-center p-2 z-50 hidden">
+    <div class="bg-slate-900 rounded-2xl shadow-2xl border border-slate-800 w-full max-w-md overflow-hidden flex flex-col h-[95vh]">
       
       <!-- Camera Top Bar -->
-      <div class="bg-slate-900 text-white px-4 py-2.5 flex items-center justify-between border-b border-slate-800">
+      <div class="bg-slate-900 text-white px-4 py-2.5 flex items-center justify-between border-b border-slate-800 shrink-0">
         <div class="flex items-center gap-2">
           <i class="fa-solid fa-camera text-rose-500 text-sm"></i>
-          <h3 class="font-bold text-xs md:text-sm">กล้องถ่ายใบเสร็จ (พร้อมตัดขอบ)</h3>
+          <h3 class="font-bold text-xs md:text-sm">กล้องสแกนใบเสร็จ (Microsoft Lens / Adobe Scan)</h3>
         </div>
         <button id="btnCloseCameraModal" class="text-slate-400 hover:text-white text-base"><i class="fa-solid fa-xmark"></i></button>
       </div>
 
-      <!-- Viewfinder Area with Smart Receipt Guide -->
+      <!-- Live Viewfinder with Auto Boundary Box -->
       <div class="relative flex-1 bg-black flex items-center justify-center overflow-hidden p-2">
         <video id="cameraVideo" autoplay playsinline class="w-full h-full object-cover rounded-xl"></video>
         
-        <!-- Smart Receipt Edge Guide Frame -->
-        <div id="receiptFrameGuide" class="absolute inset-x-8 inset-y-6 border-2 border-rose-500/80 rounded-xl pointer-events-none flex flex-col justify-between p-3 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]">
-          <div class="flex items-center justify-between">
-            <span class="text-[10px] bg-rose-600 text-white font-semibold px-2 py-0.5 rounded-full flex items-center gap-1 shadow">
-              <i class="fa-solid fa-crop-simple"></i> กรอบตัดขอบอัตโนมัติ
-            </span>
-            <span id="guideTorchIcon" class="text-amber-400 text-xs hidden"><i class="fa-solid fa-bolt"></i></span>
-          </div>
-          <div class="text-center">
-            <span class="text-[10px] text-white/90 bg-black/60 px-3 py-1 rounded-full backdrop-blur-xs">
-              วางกระดาษใบเสร็จให้เต็มกรอบสีแดง
-            </span>
-          </div>
-        </div>
+        <!-- Detected Edge Quad Path Canvas -->
+        <canvas id="liveDetectionCanvas" class="absolute inset-2 pointer-events-none w-[calc(100%-16px)] h-[calc(100%-16px)] rounded-xl"></canvas>
 
-        <canvas id="cameraCanvas" class="hidden"></canvas>
+        <div class="absolute top-4 inset-x-0 flex justify-center pointer-events-none">
+          <span class="text-[11px] text-white/90 bg-black/60 px-3 py-1 rounded-full backdrop-blur-xs shadow flex items-center gap-1">
+            <i class="fa-solid fa-arrows-to-dot text-rose-400"></i> เล็งกระดาษสลิป ระบบตรวจจับมุมอัตโนมัติ
+          </span>
+        </div>
       </div>
 
-      <!-- Auto Crop Option Toggle & Actions -->
-      <div class="bg-slate-900 p-3 border-t border-slate-800 flex flex-col gap-2.5">
-        <div class="flex items-center justify-between text-xs text-slate-300 px-1">
-          <label class="cursor-pointer flex items-center gap-2 select-none">
-            <input type="checkbox" id="autoCropToggle" checked class="w-3.5 h-3.5 text-rose-600 rounded">
-            <span>ตัดขอบรอบนอกอัตโนมัติ (Auto-Crop)</span>
-          </label>
-          <button id="btnSwitchCamera" class="text-slate-300 hover:text-white text-xs flex items-center gap-1">
-            <i class="fa-solid fa-camera-rotate"></i> สลับกล้อง
-          </button>
-        </div>
+      <!-- Actions Footer -->
+      <div class="bg-slate-900 p-3 border-t border-slate-800 flex items-center justify-around shrink-0">
+        <button id="btnSwitchCamera" class="text-slate-400 hover:text-white text-xs flex flex-col items-center gap-1">
+          <i class="fa-solid fa-camera-rotate text-base"></i>
+          <span>สลับกล้อง</span>
+        </button>
+        <!-- Big Capture Shutter -->
+        <button id="btnCapturePhoto" class="w-16 h-16 rounded-full bg-rose-600 hover:bg-rose-500 border-4 border-white flex items-center justify-center shadow-2xl transition active:scale-95">
+          <i class="fa-solid fa-camera text-white text-xl"></i>
+        </button>
+        <button id="btnCancelCamera" class="text-slate-400 hover:text-white text-xs flex flex-col items-center gap-1">
+          <i class="fa-solid fa-xmark text-base"></i>
+          <span>ยกเลิก</span>
+        </button>
+      </div>
 
-        <div class="flex items-center justify-around pt-1">
-          <button id="btnCancelCamera" class="px-4 py-2 text-xs text-slate-400 hover:text-white transition">ยกเลิก</button>
-          <!-- Big Shutter Button -->
-          <button id="btnCapturePhoto" class="w-14 h-14 rounded-full bg-rose-600 hover:bg-rose-500 border-4 border-white flex items-center justify-center shadow-lg transition active:scale-95">
-            <i class="fa-solid fa-camera text-white text-lg"></i>
-          </button>
-          <div class="w-12"></div> <!-- Spacer -->
+    </div>
+  </div>
+
+  <!-- STEP 2: INTERACTIVE 4-CORNER CROP EDITOR (ปรับมุม 4 จุดเหมือน Adobe Scan) -->
+  <div id="cornerCropModal" class="fixed inset-0 bg-slate-950/95 flex items-center justify-center p-2 z-50 hidden">
+    <div class="bg-slate-900 rounded-2xl shadow-2xl border border-slate-800 w-full max-w-md overflow-hidden flex flex-col h-[95vh]">
+      
+      <div class="bg-slate-900 text-white px-4 py-2.5 flex items-center justify-between border-b border-slate-800 shrink-0">
+        <div class="flex items-center gap-1.5">
+          <i class="fa-solid fa-crop-simple text-rose-500"></i>
+          <h3 class="font-bold text-xs md:text-sm">ลากมุม 4 จุด ปรับขอบใบเสร็จ (Corner Pin)</h3>
         </div>
+        <button id="btnRetakePhoto" class="text-xs text-rose-400 hover:text-rose-300 font-medium flex items-center gap-1">
+          <i class="fa-solid fa-rotate-left"></i> ถ่ายใหม่
+        </button>
+      </div>
+
+      <!-- Crop Canvas & Handle Overlay Container -->
+      <div id="cropEditorContainer" class="relative flex-1 bg-black flex items-center justify-center overflow-hidden p-2">
+        <canvas id="cropEditorCanvas" class="max-w-full max-h-full rounded-lg shadow-2xl"></canvas>
+        <svg id="cropSvgOverlay" class="absolute inset-0 w-full h-full pointer-events-none">
+          <polygon id="cropPolygon" points="" class="fill-rose-500/20 stroke-rose-500 stroke-2" stroke-dasharray="4"/>
+        </svg>
+        
+        <!-- 4 Draggable Handles (Adobe Scan Style) -->
+        <div id="handleTL" class="crop-handle"></div>
+        <div id="handleTR" class="crop-handle"></div>
+        <div id="handleBR" class="crop-handle"></div>
+        <div id="handleBL" class="crop-handle"></div>
+      </div>
+
+      <!-- Crop Confirm Controls -->
+      <div class="bg-slate-900 p-3 border-t border-slate-800 flex items-center justify-between shrink-0">
+        <button id="btnAutoFitCorners" class="px-3 py-2 text-xs bg-slate-800 text-slate-300 hover:text-white rounded-lg flex items-center gap-1 transition">
+          <i class="fa-solid fa-wand-magic-sparkles text-amber-400"></i> จัดขอบอัตโนมัติ
+        </button>
+        <button id="btnConfirmCrop" class="px-5 py-2 text-xs bg-red-600 hover:bg-red-700 text-white font-bold rounded-lg shadow-md flex items-center gap-1.5 transition">
+          <i class="fa-solid fa-check"></i> ตัดขอบ & บันทึก
+        </button>
       </div>
 
     </div>
