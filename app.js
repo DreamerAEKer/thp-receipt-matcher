@@ -1110,15 +1110,31 @@ function extractReceiptApiItems(json) {
   return Array.from(itemsByBarcode.values()).filter(item => cleanTrackNo(item.barcode));
 }
 
+function buildReceiptCode(zipPrefix, trNumber) {
+  const zip = String(zipPrefix || '').replace(/\D/g, '');
+  const trDigits = String(trNumber || '').replace(/\D/g, '');
+  return {
+    zip,
+    trDigits,
+    fullCode: trDigits.startsWith(zip) && trDigits.length > zip.length
+      ? trDigits
+      : zip + trDigits
+  };
+}
+
 async function fetchTrackingByTR(trNumber) {
-  const zip = state.defaultZipPrefix;
-  const fullTRCode = zip + '|' + trNumber;
+  const { zip, trDigits, fullCode: fullTRCode } = buildReceiptCode(state.defaultZipPrefix, trNumber);
   const btnFetchTR = document.getElementById('btnFetchTR');
 
   btnFetchTR.disabled = true;
   btnFetchTR.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
 
   try {
+    if (zip.length !== 5 || !trDigits) {
+      alert('กรุณาตรวจสอบรหัสไปรษณีย์ 5 หลักและเลข TR ให้ถูกต้อง');
+      return;
+    }
+
     if (!state.apiToken) {
       const openSettings = confirm(
         'ยังไม่ได้ตั้งค่า Token สำหรับเชื่อมต่อ API\n\n' +
@@ -1168,6 +1184,7 @@ async function fetchTrackingByTR(trNumber) {
 
     const openWeb = confirm(
       'API ตอบกลับสำเร็จ แต่ไม่พบรายการสำหรับเลข TR นี้\n\nรหัส: ' + fullTRCode +
+      '\n(ระบบส่งรหัสไปรษณีย์ต่อกับเลข TR โดยไม่มีเครื่องหมายคั่น)' +
       '\nต้องการเปิดหน้า Dashboard เพื่อตรวจสอบหรือไม่?'
     );
     if (openWeb) window.open('https://track.thailandpost.co.th/dashboard', '_blank');

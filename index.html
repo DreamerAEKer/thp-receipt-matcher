@@ -101,10 +101,10 @@
       
       <!-- TR Fast Track Bar -->
       <div class="flex items-center bg-slate-50 border border-slate-300 rounded-lg p-0.5 text-xs shadow-inner shrink-0">
-        <div class="px-1.5 md:px-2 py-1 bg-slate-200 text-slate-700 font-mono font-bold rounded-l flex items-center gap-1 cursor-pointer" id="btnEditZipPrefix" title="แตะเพื่อเปลี่ยนรหัสต้นทาง">
+        <div class="px-1.5 md:px-2 py-1 bg-slate-200 text-slate-700 font-mono font-bold rounded-l flex items-center gap-1 cursor-pointer" id="btnEditZipPrefix" title="รหัสไปรษณีย์ 5 หลัก — ระบบจะต่อกับเลข TR โดยอัตโนมัติ">
           <span id="labelZipPrefix" class="text-[11px] md:text-xs">(10501)</span>
         </div>
-        <input type="text" id="trNumberInput" value="" placeholder="เลข TR"
+        <input type="text" id="trNumberInput" value="" placeholder="เลข TR เท่านั้น" inputmode="numeric" pattern="[0-9]*"
                class="w-20 md:w-28 px-1.5 md:px-2 py-1 text-[11px] md:text-xs font-mono font-semibold bg-transparent focus:outline-none text-slate-900">
         <button id="btnFetchTR" class="bg-red-600 hover:bg-red-700 text-white px-2.5 md:px-3 py-1 rounded font-medium flex items-center gap-1 transition shadow-xs text-xs">
           <i class="fa-solid fa-cloud-arrow-down text-[11px]"></i>
