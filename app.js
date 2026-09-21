@@ -15,6 +15,8 @@ const state = {
   cameraFacingMode: 'environment',
   defaultZipPrefix: localStorage.getItem('thp_zip_prefix') || '10501',
   apiToken: localStorage.getItem('thp_api_token') || '',
+  apiAccessToken: localStorage.getItem('thp_api_access_token') || '',
+  apiAccessTokenExpire: localStorage.getItem('thp_api_access_token_expire') || '',
   currentSessionId: null,
   mobileViewMode: 'split',
   
@@ -996,17 +998,116 @@ function setupApiModal() {
   btnSave.onclick = () => {
     const zip = document.getElementById('apiZipPrefixInput').value.trim() || '10501';
     const token = document.getElementById('apiTokenInput').value.trim();
+    const tokenChanged = token !== state.apiToken;
 
     state.defaultZipPrefix = zip;
     state.apiToken = token;
+
+    if (tokenChanged) clearCachedApiAccessToken();
 
     localStorage.setItem('thp_zip_prefix', zip);
     localStorage.setItem('thp_api_token', token);
 
     document.getElementById('labelZipPrefix').textContent = '(' + zip + ')';
     closeModal();
-    alert('บันทึกการตั้งค่า API เรียบร้อยแล้ว!');
+    alert('บันทึก Token Key เรียบร้อยแล้ว ระบบจะขอ Access Token ให้อัตโนมัติเมื่อดึง TR');
   };
+}
+
+const TRACK_API_BASE = 'https://trackapi.thailandpost.co.th/post/api/v1';
+
+function clearCachedApiAccessToken() {
+  state.apiAccessToken = '';
+  state.apiAccessTokenExpire = '';
+  localStorage.removeItem('thp_api_access_token');
+  localStorage.removeItem('thp_api_access_token_expire');
+}
+
+function parseApiExpire(expire) {
+  if (!expire) return 0;
+  const normalized = String(expire).trim().replace(' ', 'T');
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function hasUsableApiAccessToken() {
+  if (!state.apiAccessToken) return false;
+  const expireAt = parseApiExpire(state.apiAccessTokenExpire);
+  return expireAt > Date.now() + 60_000;
+}
+
+async function requestApiAccessToken({ force = false } = {}) {
+  if (!force && hasUsableApiAccessToken()) return state.apiAccessToken;
+
+  clearCachedApiAccessToken();
+  const response = await fetch(TRACK_API_BASE + '/authenticate/token', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Token ' + state.apiToken,
+      'Content-Type': 'application/json'
+    }
+  });
+
+  if (!response.ok) {
+    const error = new Error('AUTH_FAILED');
+    error.status = response.status;
+    throw error;
+  }
+
+  const data = await response.json();
+  if (!data?.token) throw new Error('AUTH_TOKEN_MISSING');
+
+  state.apiAccessToken = data.token;
+  state.apiAccessTokenExpire = data.expire || '';
+  localStorage.setItem('thp_api_access_token', state.apiAccessToken);
+  localStorage.setItem('thp_api_access_token_expire', state.apiAccessTokenExpire);
+  return state.apiAccessToken;
+}
+
+async function requestReceiptTracking(fullTRCode, { retryAuth = true } = {}) {
+  const accessToken = await requestApiAccessToken();
+  const response = await fetch(TRACK_API_BASE + '/receipt/track', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Token ' + accessToken,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      status: 'all',
+      language: 'TH',
+      receiptNo: [fullTRCode]
+    })
+  });
+
+  if (retryAuth && (response.status === 401 || response.status === 403)) {
+    await requestApiAccessToken({ force: true });
+    return requestReceiptTracking(fullTRCode, { retryAuth: false });
+  }
+
+  return response;
+}
+
+function extractReceiptApiItems(json) {
+  const directItems = json?.response?.items;
+  if (Array.isArray(directItems)) return directItems;
+
+  const receipts = json?.response?.receipts;
+  if (!receipts || typeof receipts !== 'object') return [];
+
+  const itemsByBarcode = new Map();
+  Object.values(receipts).forEach(receipt => {
+    if (!receipt || typeof receipt !== 'object') return;
+    Object.entries(receipt).forEach(([barcode, statuses]) => {
+      const statusList = Array.isArray(statuses) ? statuses : [statuses];
+      const latest = statusList.filter(Boolean).at(-1) || {};
+      itemsByBarcode.set(cleanTrackNo(latest.barcode || barcode), {
+        ...latest,
+        barcode: latest.barcode || barcode
+      });
+    });
+  });
+
+  return Array.from(itemsByBarcode.values()).filter(item => cleanTrackNo(item.barcode));
 }
 
 async function fetchTrackingByTR(trNumber) {
@@ -1027,18 +1128,11 @@ async function fetchTrackingByTR(trNumber) {
       return;
     }
 
-    const response = await fetch('https://trackapi.thailandpost.co.th/post/api/v1/track/receipt', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + state.apiToken,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ receipt_no: fullTRCode })
-    });
+    const response = await requestReceiptTracking(fullTRCode);
 
     if (response.status === 401 || response.status === 403) {
       const openSettings = confirm(
-        'Token หมดอายุ ไม่ถูกต้อง หรือไม่มีสิทธิ์เรียก API\n' +
+        'ระบบขอ Access Token ใหม่แล้ว แต่ยังไม่มีสิทธิ์เรียกข้อมูลใบเสร็จ\n' +
         'สถานะ: ' + response.status + '\n\nต้องการเปิดหน้าตั้งค่า Token หรือไม่?'
       );
       if (openSettings) document.getElementById('btnOpenApiModal').click();
@@ -1065,7 +1159,7 @@ async function fetchTrackingByTR(trNumber) {
     }
 
     const json = await response.json();
-    const items = json?.response?.items;
+    const items = extractReceiptApiItems(json);
     if (Array.isArray(items) && items.length > 0) {
       processApiItems(items);
       alert('ดึงข้อมูลสำเร็จผ่าน API: ' + items.length + ' รายการ');
@@ -1079,7 +1173,18 @@ async function fetchTrackingByTR(trNumber) {
     if (openWeb) window.open('https://track.thailandpost.co.th/dashboard', '_blank');
   } catch (err) {
     console.error(err);
-    alert('เชื่อมต่อ Track API ไม่สำเร็จ กรุณาตรวจสอบอินเทอร์เน็ตหรือข้อจำกัดของเบราว์เซอร์แล้วลองใหม่');
+    if (err.message === 'AUTH_FAILED') {
+      const openSettings = confirm(
+        'ไม่สามารถขอ Access Token จาก Token Key ได้\n' +
+        'สถานะ: ' + (err.status || '-') +
+        '\n\nกรุณาตรวจสอบ Token Key ในหน้า Dashboard ต้องการเปิดหน้าตั้งค่าหรือไม่?'
+      );
+      if (openSettings) document.getElementById('btnOpenApiModal').click();
+    } else if (err.message === 'AUTH_TOKEN_MISSING') {
+      alert('API ตอบกลับมาแต่ไม่พบ Access Token กรุณาลองใหม่หรือตรวจสอบสถานะบริการ');
+    } else {
+      alert('เชื่อมต่อ Track API ไม่สำเร็จ กรุณาตรวจสอบอินเทอร์เน็ตหรือข้อจำกัด CORS ของเบราว์เซอร์แล้วลองใหม่');
+    }
   } finally {
     btnFetchTR.disabled = false;
     btnFetchTR.innerHTML = '<i class="fa-solid fa-cloud-arrow-down"></i> <span class="hidden sm:inline">ดึง TR</span>';
@@ -1092,6 +1197,7 @@ function processApiItems(items) {
   items.forEach(item => {
     const barcode = cleanTrackNo(item.barcode || item.track_no);
     if (!barcode) return;
+    const apiStatusCode = String(item.status_code || item.status || '');
 
     nextReceiptItems.push({
       no: nextReceiptItems.length + 1,
@@ -1115,7 +1221,7 @@ function processApiItems(items) {
       statusText: item.status_description || 'นำจ่ายสำเร็จ',
       statusDetail: item.receiver_name ? ('ชื่อผู้รับ: ' + item.receiver_name) : 'พัสดุถึงปลายทาง',
       statusDate: item.status_date || new Date().toLocaleDateString('th-TH'),
-      statusType: (item.status_code === '501' || (item.status_description || '').includes('สำเร็จ')) ? 'success' : 'in_transit',
+      statusType: (apiStatusCode === '501' || (item.status_description || '').includes('สำเร็จ')) ? 'success' : 'in_transit',
       depositDate: item.deposit_date || '-',
       baggingDate: item.bagging_date || '-'
     });
