@@ -56,6 +56,48 @@ function cleanTrackNo(val) {
   return String(val).replace(/\s+/g, '').toUpperCase().trim();
 }
 
+const receiptPhotoCollator = new Intl.Collator('th', { numeric: true, sensitivity: 'base' });
+
+function sortReceiptPhotoBatch(photos) {
+  return [...photos].sort((a, b) => {
+    const nameCompare = receiptPhotoCollator.compare(a.sortName || a.label || '', b.sortName || b.label || '');
+    if (nameCompare !== 0) return nameCompare;
+    return Number(a.lastModified || 0) - Number(b.lastModified || 0);
+  });
+}
+
+function alignReceiptItemsToPhotos() {
+  state.receiptItems = state.receiptItems
+    .map((item, originalIndex) => ({ item, originalIndex }))
+    .sort((a, b) => (Number(a.item.no) || a.originalIndex + 1) - (Number(b.item.no) || b.originalIndex + 1))
+    .map(entry => entry.item);
+
+  state.photos.forEach(photo => {
+    delete photo.startNo;
+    delete photo.endNo;
+  });
+
+  const totalItems = state.receiptItems.length;
+  const totalPhotos = state.photos.length;
+
+  state.receiptItems.forEach((item, index) => {
+    item.no = index + 1;
+    item.photoIndex = totalPhotos > 0
+      ? Math.min(totalPhotos - 1, Math.floor(index * totalPhotos / totalItems))
+      : 0;
+
+    const photo = state.photos[item.photoIndex];
+    if (photo) {
+      if (!photo.startNo) photo.startNo = item.no;
+      photo.endNo = item.no;
+    }
+  });
+
+  if (state.receiptItems.length > 0) {
+    state.activeItemNo = state.receiptItems[0].no;
+  }
+}
+
 const HISTORY_DB_NAME = 'thp_receipt_matcher_history';
 const HISTORY_DB_VERSION = 1;
 const HISTORY_STORE_NAME = 'sessions';
@@ -966,6 +1008,7 @@ function applyPerspectiveCrop() {
 
   state.photos.unshift(newPhotoObj);
   state.activePhotoIndex = 0;
+  alignReceiptItemsToPhotos();
 
   // Set image directly
   const imgEl = document.getElementById('receiptImage');
@@ -1246,7 +1289,7 @@ function processApiItems(items) {
 
   if (nextReceiptItems.length > 0) {
     state.receiptItems = nextReceiptItems;
-    state.activeItemNo = nextReceiptItems[0].no;
+    alignReceiptItemsToPhotos();
   }
 
   renderItems();
@@ -1295,13 +1338,25 @@ function setupEventListeners() {
 
   // User receipt image upload
   document.getElementById('imageFileInput').addEventListener('change', (e) => {
-    const file = e.target.files[0];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      state.photos.push({ label: 'รูปใหม่ #' + (state.photos.length + 1), file: url, isUserUploaded: true });
-      state.activePhotoIndex = state.photos.length - 1;
-      switchPhoto(state.activePhotoIndex, false);
-    }
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    const firstNewIndex = state.photos.length;
+    const newPhotos = sortReceiptPhotoBatch(files.map((file, selectionIndex) => ({
+      label: file.name,
+      sortName: file.name,
+      lastModified: file.lastModified,
+      selectionIndex,
+      file: URL.createObjectURL(file),
+      isUserUploaded: true
+    })));
+
+    state.photos.push(...newPhotos);
+    alignReceiptItemsToPhotos();
+    state.activePhotoIndex = firstNewIndex;
+    switchPhoto(state.activePhotoIndex, false);
+    e.target.value = '';
+    alert('เพิ่มรูปใบเสร็จ ' + newPhotos.length + ' ไฟล์ เรียงลำดับหน้า 1–' + state.photos.length + ' แล้ว');
   });
 
   // Track Detail Modal
@@ -1403,7 +1458,7 @@ function processExcelRows(rows) {
       extra: 0,
       photoIndex: 0
     }));
-    state.activeItemNo = 1;
+    alignReceiptItemsToPhotos();
   }
 
   renderItems();
@@ -1438,7 +1493,7 @@ function renderItems() {
     }
 
     return true;
-  });
+  }).sort((a, b) => Number(a.no) - Number(b.no));
 
   document.getElementById('countBadge').textContent = filtered.length + " รายการ";
 
