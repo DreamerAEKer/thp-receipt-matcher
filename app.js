@@ -1018,36 +1018,68 @@ async function fetchTrackingByTR(trNumber) {
   btnFetchTR.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
 
   try {
-    if (state.apiToken) {
-      const response = await fetch('https://trackapi.thailandpost.co.th/post/api/v1/track/receipt', {
-        method: 'POST',
-        headers: {
-          'Authorization': 'Bearer ' + state.apiToken,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ receipt_no: fullTRCode })
-      });
-
-      if (response.ok) {
-        const json = await response.json();
-        if (json && json.response && json.response.items) {
-          processApiItems(json.response.items);
-          alert('ดึงข้อมูลสำเร็จผ่าน API: ' + json.response.items.length + ' รายการ');
-          return;
-        }
-      }
+    if (!state.apiToken) {
+      const openSettings = confirm(
+        'ยังไม่ได้ตั้งค่า Token สำหรับเชื่อมต่อ API\n\n' +
+        'รหัส: ' + fullTRCode + '\nต้องการเปิดหน้าตั้งค่า Token หรือไม่?'
+      );
+      if (openSettings) document.getElementById('btnOpenApiModal').click();
+      return;
     }
 
-    const reason = state.apiToken
-      ? 'API ไม่คืนข้อมูลสำหรับรหัสนี้'
-      : 'ยังไม่ได้ตั้งค่า Token สำหรับเชื่อมต่อ API';
-    const openWeb = confirm(reason + '\n\nรหัส: ' + fullTRCode + '\nต้องการเปิดหน้า Dashboard เพื่อตรวจสอบข้อมูลหรือไม่?');
-    if (openWeb) {
-      window.open('https://track.thailandpost.co.th/dashboard', '_blank');
+    const response = await fetch('https://trackapi.thailandpost.co.th/post/api/v1/track/receipt', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + state.apiToken,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ receipt_no: fullTRCode })
+    });
+
+    if (response.status === 401 || response.status === 403) {
+      const openSettings = confirm(
+        'Token หมดอายุ ไม่ถูกต้อง หรือไม่มีสิทธิ์เรียก API\n' +
+        'สถานะ: ' + response.status + '\n\nต้องการเปิดหน้าตั้งค่า Token หรือไม่?'
+      );
+      if (openSettings) document.getElementById('btnOpenApiModal').click();
+      return;
     }
+
+    if (response.status === 429) {
+      alert('เรียก API ถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง (สถานะ 429)');
+      return;
+    }
+
+    if (response.status === 404) {
+      const openWeb = confirm(
+        'ไม่พบข้อมูลเลข TR นี้ใน API\n\nรหัส: ' + fullTRCode +
+        '\nต้องการเปิดหน้า Dashboard เพื่อตรวจสอบหรือไม่?'
+      );
+      if (openWeb) window.open('https://track.thailandpost.co.th/dashboard', '_blank');
+      return;
+    }
+
+    if (!response.ok) {
+      alert('API ขัดข้องหรือไม่สามารถให้บริการได้ในขณะนี้ (สถานะ ' + response.status + ')');
+      return;
+    }
+
+    const json = await response.json();
+    const items = json?.response?.items;
+    if (Array.isArray(items) && items.length > 0) {
+      processApiItems(items);
+      alert('ดึงข้อมูลสำเร็จผ่าน API: ' + items.length + ' รายการ');
+      return;
+    }
+
+    const openWeb = confirm(
+      'API ตอบกลับสำเร็จ แต่ไม่พบรายการสำหรับเลข TR นี้\n\nรหัส: ' + fullTRCode +
+      '\nต้องการเปิดหน้า Dashboard เพื่อตรวจสอบหรือไม่?'
+    );
+    if (openWeb) window.open('https://track.thailandpost.co.th/dashboard', '_blank');
   } catch (err) {
     console.error(err);
-    alert('เกิดข้อผิดพลาดในการเชื่อมต่อ: ' + err.message);
+    alert('เชื่อมต่อ Track API ไม่สำเร็จ กรุณาตรวจสอบอินเทอร์เน็ตหรือข้อจำกัดของเบราว์เซอร์แล้วลองใหม่');
   } finally {
     btnFetchTR.disabled = false;
     btnFetchTR.innerHTML = '<i class="fa-solid fa-cloud-arrow-down"></i> <span class="hidden sm:inline">ดึง TR</span>';
