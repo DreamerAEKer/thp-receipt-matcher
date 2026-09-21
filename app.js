@@ -15,6 +15,7 @@ const state = {
   cameraFacingMode: 'environment',
   defaultZipPrefix: localStorage.getItem('thp_zip_prefix') || '10501',
   apiToken: localStorage.getItem('thp_api_token') || '',
+  currentSessionId: null,
   mobileViewMode: 'split',
   
   // Crop Editor State (Adobe Scan / Microsoft Lens Style)
@@ -30,16 +31,6 @@ const state = {
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
-  if (window.APP_DATA) {
-    state.receiptItems = JSON.parse(JSON.stringify(window.APP_DATA.receiptItems || []));
-    state.photos = window.APP_DATA.sampleImages || [];
-    
-    (window.APP_DATA.excelTracking || []).forEach(item => {
-      const cleanBarcode = cleanTrackNo(item.barcode);
-      state.excelMap.set(cleanBarcode, item);
-    });
-  }
-
   document.getElementById('labelZipPrefix').textContent = '(' + state.defaultZipPrefix + ')';
   document.getElementById('apiZipPrefixInput').value = state.defaultZipPrefix;
   document.getElementById('apiTokenInput').value = state.apiToken;
@@ -50,19 +41,460 @@ document.addEventListener('DOMContentLoaded', () => {
   setupLensCamera();
   setupCornerCropEditor();
   setupApiModal();
+  setupHistory();
   setupMobileTabs();
   renderPhotoTabs();
   renderItems();
   updateStats();
-
-  if (state.receiptItems.length > 0) {
-    selectItem(state.receiptItems[0], false);
-  }
+  showEmptyPhotoState();
 });
 
 function cleanTrackNo(val) {
   if (!val) return '';
   return String(val).replace(/\s+/g, '').toUpperCase().trim();
+}
+
+const HISTORY_DB_NAME = 'thp_receipt_matcher_history';
+const HISTORY_DB_VERSION = 1;
+const HISTORY_STORE_NAME = 'sessions';
+const HISTORY_LIMIT = 30;
+let historyDbPromise = null;
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function openHistoryDb() {
+  if (historyDbPromise) return historyDbPromise;
+
+  historyDbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(HISTORY_DB_NAME, HISTORY_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(HISTORY_STORE_NAME)) {
+        const store = db.createObjectStore(HISTORY_STORE_NAME, { keyPath: 'id' });
+        store.createIndex('updatedAt', 'updatedAt');
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('เปิดฐานข้อมูลประวัติไม่สำเร็จ'));
+  });
+
+  return historyDbPromise;
+}
+
+async function getAllHistory() {
+  const db = await openHistoryDb();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(HISTORY_STORE_NAME, 'readonly')
+      .objectStore(HISTORY_STORE_NAME).getAll();
+    request.onsuccess = () => {
+      const records = request.result || [];
+      records.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+      resolve(records);
+    };
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getHistoryById(id) {
+  const db = await openHistoryDb();
+  return new Promise((resolve, reject) => {
+    const request = db.transaction(HISTORY_STORE_NAME, 'readonly')
+      .objectStore(HISTORY_STORE_NAME).get(id);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function putHistory(record) {
+  const db = await openHistoryDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(HISTORY_STORE_NAME, 'readwrite');
+    tx.objectStore(HISTORY_STORE_NAME).put(record);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('บันทึกประวัติไม่สำเร็จ'));
+  });
+  await trimHistory();
+}
+
+async function deleteHistoryById(id) {
+  const db = await openHistoryDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HISTORY_STORE_NAME, 'readwrite');
+    tx.objectStore(HISTORY_STORE_NAME).delete(id);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function trimHistory() {
+  const records = await getAllHistory();
+  const overflow = records.slice(HISTORY_LIMIT);
+  if (overflow.length === 0) return;
+  const db = await openHistoryDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(HISTORY_STORE_NAME, 'readwrite');
+    overflow.forEach(record => tx.objectStore(HISTORY_STORE_NAME).delete(record.id));
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function hasCurrentWork() {
+  return state.receiptItems.length > 0 || state.excelMap.size > 0 || state.photos.length > 0 ||
+    document.getElementById('trNumberInput').value.trim().length > 0;
+}
+
+async function serializePhotosForStorage() {
+  const photos = [];
+  for (const photo of state.photos) {
+    let storedFile = photo.file;
+    if (typeof storedFile === 'string' && storedFile.startsWith('blob:')) {
+      storedFile = await fetch(storedFile).then(response => response.blob());
+    }
+    photos.push({ ...photo, file: storedFile });
+  }
+  return photos;
+}
+
+function hydratePhotos(photos) {
+  return (photos || []).map(photo => {
+    const hydrated = { ...photo };
+    if (hydrated.file instanceof Blob) {
+      hydrated.file = URL.createObjectURL(hydrated.file);
+      hydrated.isUserUploaded = true;
+    }
+    return hydrated;
+  });
+}
+
+function getSessionStats(receiptItems, excelEntries) {
+  const excelMap = new Map(excelEntries || []);
+  let matched = 0;
+  let delivered = 0;
+  (receiptItems || []).forEach(item => {
+    const track = cleanTrackNo(item.trackNo);
+    const excel = excelMap.get(track);
+    if (excel) matched++;
+    if (excel?.statusType === 'success') delivered++;
+  });
+  return { total: (receiptItems || []).length, matched, delivered };
+}
+
+async function saveCurrentSession({ silent = false } = {}) {
+  if (!hasCurrentWork()) {
+    if (!silent) alert('ยังไม่มีข้อมูลงานสำหรับบันทึก');
+    return false;
+  }
+
+  const now = new Date().toISOString();
+  const trNumber = document.getElementById('trNumberInput').value.trim();
+  const existing = state.currentSessionId ? await getHistoryById(state.currentSessionId) : null;
+  const id = state.currentSessionId || crypto.randomUUID();
+  const excelEntries = Array.from(state.excelMap.entries());
+  const receiptItems = JSON.parse(JSON.stringify(state.receiptItems));
+  const firstTrack = receiptItems[0]?.trackNo || '';
+  const title = trNumber ? `TR ${state.defaultZipPrefix}|${trNumber}` :
+    (firstTrack ? `งาน ${firstTrack}` : `งานวันที่ ${new Date().toLocaleDateString('th-TH')}`);
+
+  const record = {
+    id,
+    version: 1,
+    title,
+    trNumber,
+    zipPrefix: state.defaultZipPrefix,
+    createdAt: existing?.createdAt || now,
+    updatedAt: now,
+    receiptItems,
+    excelEntries,
+    photos: await serializePhotosForStorage(),
+    stats: getSessionStats(receiptItems, excelEntries)
+  };
+
+  await putHistory(record);
+  state.currentSessionId = id;
+  if (!silent) alert('บันทึกงานลงประวัติในเครื่องเรียบร้อยแล้ว');
+  return true;
+}
+
+async function restoreHistory(id) {
+  const record = await getHistoryById(id);
+  if (!record) {
+    alert('ไม่พบประวัติงานนี้ อาจถูกลบไปแล้ว');
+    return;
+  }
+
+  if (hasCurrentWork() && state.currentSessionId !== id) {
+    const proceed = confirm('การเรียกคืนจะเปลี่ยนงานที่กำลังแสดง\nต้องการบันทึกงานปัจจุบันก่อนหรือไม่?');
+    if (proceed) await saveCurrentSession({ silent: true });
+  }
+
+  revokeUserPhotoUrls();
+  state.currentSessionId = record.id;
+  state.receiptItems = JSON.parse(JSON.stringify(record.receiptItems || []));
+  state.excelMap = new Map(record.excelEntries || []);
+  state.photos = hydratePhotos(record.photos || []);
+  state.activeItemNo = state.receiptItems[0]?.no || 1;
+  state.activePhotoIndex = 0;
+  state.currentFilter = 'all';
+  state.searchQuery = '';
+  state.zoom = 1;
+  state.rotation = 0;
+
+  if (record.zipPrefix) {
+    state.defaultZipPrefix = record.zipPrefix;
+    document.getElementById('labelZipPrefix').textContent = '(' + record.zipPrefix + ')';
+    document.getElementById('apiZipPrefixInput').value = record.zipPrefix;
+  }
+  document.getElementById('trNumberInput').value = record.trNumber || '';
+  document.getElementById('searchInput').value = '';
+  document.getElementById('zoomLevelIndicator').textContent = '100%';
+
+  renderPhotoTabs();
+  renderItems();
+  updateStats();
+  if (state.photos.length > 0) switchPhoto(0, false);
+  else showEmptyPhotoState();
+  document.getElementById('historyModal').classList.add('hidden');
+}
+
+function formatHistoryDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString('th-TH', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function historySearchText(record) {
+  const itemText = (record.receiptItems || [])
+    .map(item => `${item.trackNo || ''} ${item.recipient || ''} ${item.destinationName || ''}`).join(' ');
+  return `${record.title || ''} ${record.trNumber || ''} ${itemText}`.toLowerCase();
+}
+
+async function renderHistoryList() {
+  const container = document.getElementById('historyList');
+  const query = document.getElementById('historySearchInput').value.trim().toLowerCase();
+  const allRecords = await getAllHistory();
+  const records = query ? allRecords.filter(record => historySearchText(record).includes(query)) : allRecords;
+
+  document.getElementById('historyCountLabel').textContent = `${allRecords.length}/${HISTORY_LIMIT} งาน`;
+  if (records.length === 0) {
+    container.innerHTML = `
+      <div class="text-center py-10 text-slate-400 border border-dashed border-slate-300 rounded-xl">
+        <i class="fa-solid fa-box-archive text-3xl text-slate-300 mb-2"></i>
+        <p class="text-xs font-medium">${allRecords.length === 0 ? 'ยังไม่มีประวัติงาน' : 'ไม่พบประวัติที่ค้นหา'}</p>
+      </div>`;
+    return;
+  }
+
+  container.innerHTML = records.map(record => {
+    const stats = record.stats || getSessionStats(record.receiptItems, record.excelEntries);
+    const activeClass = state.currentSessionId === record.id ? 'border-violet-400 bg-violet-50/50' : 'border-slate-200 bg-white';
+    return `
+      <article class="border ${activeClass} rounded-xl p-3 shadow-xs" data-history-id="${escapeHtml(record.id)}">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <h4 class="text-sm font-bold text-slate-800 truncate">${escapeHtml(record.title || 'งานไม่มีชื่อ')}</h4>
+            <p class="text-[10px] text-slate-500 mt-0.5"><i class="fa-regular fa-clock"></i> ${escapeHtml(formatHistoryDate(record.updatedAt))}</p>
+          </div>
+          <div class="flex gap-1 shrink-0">
+            <button data-history-action="restore" class="px-2.5 py-1.5 text-[11px] font-semibold bg-violet-600 hover:bg-violet-700 text-white rounded-lg">
+              <i class="fa-solid fa-rotate-left"></i> เรียกคืน
+            </button>
+            <button data-history-action="delete" class="px-2 py-1.5 text-[11px] text-red-600 hover:bg-red-50 rounded-lg" title="ลบประวัตินี้">
+              <i class="fa-regular fa-trash-can"></i>
+            </button>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-2 mt-2 text-center">
+          <div class="bg-slate-50 rounded-lg py-1.5"><strong class="block text-xs text-slate-800">${stats.total || 0}</strong><span class="text-[9px] text-slate-500">รายการ</span></div>
+          <div class="bg-blue-50 rounded-lg py-1.5"><strong class="block text-xs text-blue-700">${stats.matched || 0}</strong><span class="text-[9px] text-blue-600">จับคู่</span></div>
+          <div class="bg-emerald-50 rounded-lg py-1.5"><strong class="block text-xs text-emerald-700">${stats.delivered || 0}</strong><span class="text-[9px] text-emerald-600">ส่งแล้ว</span></div>
+        </div>
+      </article>`;
+  }).join('');
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+async function updateHistoryStorageInfo() {
+  const label = document.getElementById('historyStorageInfo');
+  if (!navigator.storage?.estimate) {
+    label.textContent = 'ประวัติเก็บอยู่ในเบราว์เซอร์เครื่องนี้';
+    return;
+  }
+  const estimate = await navigator.storage.estimate();
+  label.textContent = `ใช้พื้นที่ประมาณ ${formatBytes(estimate.usage)} จาก ${formatBytes(estimate.quota)}`;
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function exportHistory() {
+  const records = await getAllHistory();
+  if (records.length === 0) {
+    alert('ยังไม่มีประวัติสำหรับส่งออก');
+    return;
+  }
+  const exported = [];
+  for (const record of records) {
+    const photos = [];
+    for (const photo of record.photos || []) {
+      photos.push({ ...photo, file: photo.file instanceof Blob ? await blobToDataUrl(photo.file) : photo.file });
+    }
+    exported.push({ ...record, photos });
+  }
+  const payload = JSON.stringify({ app: 'thp-receipt-matcher', version: 1, exportedAt: new Date().toISOString(), sessions: exported });
+  const url = URL.createObjectURL(new Blob([payload], { type: 'application/json' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `thp-receipt-history-${new Date().toISOString().slice(0, 10)}.json`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function importHistoryFile(file) {
+  const data = JSON.parse(await file.text());
+  if (data?.app !== 'thp-receipt-matcher' || !Array.isArray(data.sessions)) {
+    throw new Error('รูปแบบไฟล์สำรองไม่ถูกต้อง');
+  }
+  for (const source of data.sessions.slice(0, HISTORY_LIMIT)) {
+    if (!source || !Array.isArray(source.receiptItems) || !Array.isArray(source.excelEntries)) continue;
+    const now = new Date().toISOString();
+    await putHistory({
+      ...source,
+      id: source.id || crypto.randomUUID(),
+      version: 1,
+      createdAt: source.createdAt || now,
+      updatedAt: source.updatedAt || now,
+      photos: Array.isArray(source.photos) ? source.photos : [],
+      stats: getSessionStats(source.receiptItems, source.excelEntries)
+    });
+  }
+}
+
+function setupHistory() {
+  const modal = document.getElementById('historyModal');
+  document.getElementById('btnSaveHistory').onclick = async () => {
+    try {
+      await saveCurrentSession();
+    } catch (error) {
+      alert('บันทึกประวัติไม่สำเร็จ: ' + error.message);
+    }
+  };
+  document.getElementById('btnOpenHistory').onclick = async () => {
+    modal.classList.remove('hidden');
+    try {
+      await Promise.all([renderHistoryList(), updateHistoryStorageInfo()]);
+    } catch (error) {
+      alert('เปิดประวัติไม่สำเร็จ: ' + error.message);
+    }
+  };
+  document.getElementById('btnCloseHistory').onclick = () => modal.classList.add('hidden');
+  document.getElementById('historySearchInput').oninput = () => renderHistoryList();
+  document.getElementById('historyList').onclick = async event => {
+    const button = event.target.closest('[data-history-action]');
+    const card = event.target.closest('[data-history-id]');
+    if (!button || !card) return;
+    const id = card.getAttribute('data-history-id');
+    try {
+      if (button.getAttribute('data-history-action') === 'restore') {
+        await restoreHistory(id);
+      } else if (confirm('ต้องการลบประวัติงานนี้ถาวรหรือไม่?')) {
+        await deleteHistoryById(id);
+        if (state.currentSessionId === id) state.currentSessionId = null;
+        await renderHistoryList();
+        await updateHistoryStorageInfo();
+      }
+    } catch (error) {
+      alert('จัดการประวัติไม่สำเร็จ: ' + error.message);
+    }
+  };
+  document.getElementById('btnExportHistory').onclick = async () => {
+    try { await exportHistory(); }
+    catch (error) { alert('ส่งออกประวัติไม่สำเร็จ: ' + error.message); }
+  };
+  document.getElementById('historyImportInput').onchange = async event => {
+    const file = event.target.files[0];
+    if (!file) return;
+    try {
+      await importHistoryFile(file);
+      await renderHistoryList();
+      await updateHistoryStorageInfo();
+      alert('นำเข้าประวัติเรียบร้อยแล้ว');
+    } catch (error) {
+      alert('นำเข้าประวัติไม่สำเร็จ: ' + error.message);
+    } finally {
+      event.target.value = '';
+    }
+  };
+}
+
+function showEmptyPhotoState() {
+  const img = document.getElementById('receiptImage');
+  const hint = document.getElementById('activeItemHint');
+  if (img) {
+    img.removeAttribute('src');
+    img.classList.add('hidden');
+  }
+  if (hint) hint.textContent = 'ยังไม่มีรูป';
+}
+
+function revokeUserPhotoUrls() {
+  state.photos.forEach(photo => {
+    if (photo && photo.isUserUploaded && typeof photo.file === 'string' && photo.file.startsWith('blob:')) {
+      URL.revokeObjectURL(photo.file);
+    }
+  });
+}
+
+function startNewSession() {
+  revokeUserPhotoUrls();
+  state.receiptItems = [];
+  state.excelMap.clear();
+  state.currentFilter = 'all';
+  state.searchQuery = '';
+  state.activeItemNo = 1;
+  state.activePhotoIndex = 0;
+  state.zoom = 1;
+  state.rotation = 0;
+  state.photos = [];
+  state.rawCaptureImage = null;
+  state.currentSessionId = null;
+
+  localStorage.removeItem('thp_latest_cropped_receipt');
+
+  document.getElementById('trNumberInput').value = '';
+  document.getElementById('searchInput').value = '';
+  document.getElementById('imageFileInput').value = '';
+  document.getElementById('excelFileInput').value = '';
+  document.getElementById('zoomLevelIndicator').textContent = '100%';
+
+  document.querySelectorAll('.filter-btn').forEach(btn => {
+    const isAll = btn.getAttribute('data-filter') === 'all';
+    btn.className = 'filter-btn px-2 py-0.5 rounded font-medium ' +
+      (isAll ? 'text-slate-700 bg-white shadow-xs' : 'text-slate-500');
+  });
+
+  renderPhotoTabs();
+  renderItems();
+  updateStats();
+  showEmptyPhotoState();
 }
 
 function setupMobileTabs() {
@@ -161,6 +593,7 @@ function switchPhoto(index, scrollRightList = false) {
   if (index < 0 || index >= state.photos.length) return;
   state.activePhotoIndex = index;
   const img = document.getElementById('receiptImage');
+  img.classList.remove('hidden');
   img.src = state.photos[index].file;
   renderPhotoTabs();
 
@@ -532,16 +965,10 @@ function applyPerspectiveCrop() {
   state.photos.unshift(newPhotoObj);
   state.activePhotoIndex = 0;
 
-  // Persist latest cropped receipt in localStorage
-  try {
-    localStorage.setItem('thp_latest_cropped_receipt', dataUrl);
-  } catch(e) {
-    console.warn('Image too large for localStorage, stored in current session');
-  }
-
   // Set image directly
   const imgEl = document.getElementById('receiptImage');
   if (imgEl) {
+    imgEl.classList.remove('hidden');
     imgEl.src = dataUrl;
   }
 
@@ -611,21 +1038,12 @@ async function fetchTrackingByTR(trNumber) {
       }
     }
 
-    if (trNumber.includes('11476142') || trNumber === '') {
-      if (window.APP_DATA && window.APP_DATA.excelTracking) {
-        window.APP_DATA.excelTracking.forEach(item => {
-          const cleanBarcode = cleanTrackNo(item.barcode);
-          state.excelMap.set(cleanBarcode, item);
-        });
-      }
-      renderItems();
-      updateStats();
-      alert('ดึงข้อมูลใบเสร็จ TR: ' + fullTRCode + ' สำเร็จ! (จับคู่แล้ว ' + state.receiptItems.length + ' รายการ)');
-    } else {
-      const openWeb = confirm('ค้นหารหัส ' + fullTRCode + '\nต้องการเปิดหน้า Dashboard เพื่อตรวจสอบข้อมูลหรือไม่?');
-      if (openWeb) {
-        window.open('https://track.thailandpost.co.th/dashboard', '_blank');
-      }
+    const reason = state.apiToken
+      ? 'API ไม่คืนข้อมูลสำหรับรหัสนี้'
+      : 'ยังไม่ได้ตั้งค่า Token สำหรับเชื่อมต่อ API';
+    const openWeb = confirm(reason + '\n\nรหัส: ' + fullTRCode + '\nต้องการเปิดหน้า Dashboard เพื่อตรวจสอบข้อมูลหรือไม่?');
+    if (openWeb) {
+      window.open('https://track.thailandpost.co.th/dashboard', '_blank');
     }
   } catch (err) {
     console.error(err);
@@ -637,9 +1055,27 @@ async function fetchTrackingByTR(trNumber) {
 }
 
 function processApiItems(items) {
+  const nextReceiptItems = [];
+
   items.forEach(item => {
     const barcode = cleanTrackNo(item.barcode || item.track_no);
     if (!barcode) return;
+
+    nextReceiptItems.push({
+      no: nextReceiptItems.length + 1,
+      recipient: item.recipient_name || item.receiver_name || '-',
+      weight: item.weight || '-',
+      service: item.service_name || item.service || '-',
+      zip: item.postcode || item.zipcode || item.destination_postcode || '-',
+      destinationName: item.destination || item.delivery_office || '-',
+      trackNo: barcode,
+      trackFormatted: barcode,
+      cost: Number(item.cost || item.amount || 0),
+      discount: Number(item.discount || 0),
+      remoteFee: Number(item.remote_fee || 0),
+      extra: Number(item.extra || 0),
+      photoIndex: 0
+    });
 
     state.excelMap.set(barcode, {
       barcode: barcode,
@@ -652,6 +1088,11 @@ function processApiItems(items) {
       baggingDate: item.bagging_date || '-'
     });
   });
+
+  if (nextReceiptItems.length > 0) {
+    state.receiptItems = nextReceiptItems;
+    state.activeItemNo = nextReceiptItems[0].no;
+  }
 
   renderItems();
   updateStats();
@@ -702,7 +1143,7 @@ function setupEventListeners() {
     const file = e.target.files[0];
     if (file) {
       const url = URL.createObjectURL(file);
-      state.photos.push({ label: 'รูปใหม่ #' + (state.photos.length + 1), file: url });
+      state.photos.push({ label: 'รูปใหม่ #' + (state.photos.length + 1), file: url, isUserUploaded: true });
       state.activePhotoIndex = state.photos.length - 1;
       switchPhoto(state.activePhotoIndex, false);
     }
@@ -714,9 +1155,17 @@ function setupEventListeners() {
   document.getElementById('btnCloseTrackModalBtn').onclick = () => trackModal.classList.add('hidden');
 
   // Reset
-  document.getElementById('btnResetData').onclick = () => {
-    if (confirm('ต้องการรีเซ็ตข้อมูลกลับสู่ค่าเริ่มต้น?')) {
-      location.reload();
+  document.getElementById('btnResetData').onclick = async () => {
+    if (confirm('ต้องการล้างข้อมูลใบเสร็จ รูปภาพ และ Excel เพื่อเริ่มงานใหม่หรือไม่?\n\nรหัสต้นทางและการตั้งค่า API จะยังคงอยู่')) {
+      try {
+        const saved = hasCurrentWork() ? await saveCurrentSession({ silent: true }) : false;
+        startNewSession();
+        alert(saved
+          ? 'บันทึกงานเดิมลงประวัติและเริ่มงานใหม่เรียบร้อยแล้ว'
+          : 'ล้างข้อมูลงานเดิมแล้ว พร้อมเริ่มงานใหม่');
+      } catch (error) {
+        alert('ยังเริ่มงานใหม่ไม่ได้ เพราะบันทึกประวัติไม่สำเร็จ: ' + error.message);
+      }
     }
   };
 }
@@ -744,12 +1193,14 @@ function handleExcelUpload(e) {
 
 function processExcelRows(rows) {
   const barcodeRegex = /[A-Z]{2}\s*\d{9}\s*TH/i;
+  const importedBarcodes = [];
 
   rows.forEach(row => {
     const rowStr = Array.isArray(row) ? row.join(' ') : String(row);
     const match = rowStr.match(barcodeRegex);
     if (match) {
       const cleanBarcode = cleanTrackNo(match[0]);
+      if (!importedBarcodes.includes(cleanBarcode)) importedBarcodes.push(cleanBarcode);
       
       let statusText = 'พบข้อมูล';
       let statusDate = '';
@@ -780,6 +1231,25 @@ function processExcelRows(rows) {
       });
     }
   });
+
+  if (state.receiptItems.length === 0 && importedBarcodes.length > 0) {
+    state.receiptItems = importedBarcodes.map((barcode, index) => ({
+      no: index + 1,
+      recipient: '-',
+      weight: '-',
+      service: '-',
+      zip: '-',
+      destinationName: state.excelMap.get(barcode)?.destination || '-',
+      trackNo: barcode,
+      trackFormatted: barcode,
+      cost: 0,
+      discount: 0,
+      remoteFee: 0,
+      extra: 0,
+      photoIndex: 0
+    }));
+    state.activeItemNo = 1;
+  }
 
   renderItems();
   updateStats();
@@ -821,7 +1291,7 @@ function renderItems() {
     container.innerHTML = `
       <div class="text-center py-8 text-slate-400 bg-white rounded-xl border border-dashed border-slate-300 p-4">
         <i class="fa-solid fa-inbox text-2xl mb-1 text-slate-300"></i>
-        <p class="text-xs font-medium">ไม่พบรายการที่ค้นหา</p>
+        <p class="text-xs font-medium">${state.receiptItems.length === 0 ? 'ยังไม่มีข้อมูลงาน — ดึง TR หรือนำเข้า Excel เพื่อเริ่มต้น' : 'ไม่พบรายการที่ค้นหา'}</p>
       </div>
     `;
     return;
