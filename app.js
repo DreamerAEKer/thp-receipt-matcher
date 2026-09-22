@@ -972,6 +972,9 @@ function hydratePhotos(photos) {
       hydrated.file = URL.createObjectURL(hydrated.file);
       hydrated.isUserUploaded = true;
     }
+    if (!Array.isArray(hydrated.sequences)) {
+      hydrated.sequences = [];
+    }
     return hydrated;
   });
 }
@@ -1333,11 +1336,11 @@ function setupPageManager() {
 
   btnAutoChain.onclick = () => {
     // Read current inputs from the modal into temp photos
-    const inputs = document.querySelectorAll('#pageManageList [data-page-index]');
-    inputs.forEach(row => {
-      const idx = parseInt(row.getAttribute('data-page-index'));
-      const startVal = parseInt(row.querySelector('.input-page-start').value);
-      const endVal = parseInt(row.querySelector('.input-page-end').value);
+    const cards = document.querySelectorAll('#pageManageList > .page-manage-card');
+    cards.forEach(row => {
+      const idx = parseInt(row.getAttribute('data-page-index'), 10);
+      const startVal = parseInt(row.querySelector('.input-page-start')?.value, 10);
+      const endVal = parseInt(row.querySelector('.input-page-end')?.value, 10);
       if (state.photos[idx]) {
         state.photos[idx].startNo = Number.isFinite(startVal) ? startVal : undefined;
         state.photos[idx].endNo = Number.isFinite(endVal) ? endVal : undefined;
@@ -1349,11 +1352,11 @@ function setupPageManager() {
   };
 
   btnSave.onclick = () => {
-    const rows = document.querySelectorAll('#pageManageList [data-page-index]');
-    rows.forEach(row => {
-      const idx = parseInt(row.getAttribute('data-page-index'));
-      const startVal = parseInt(row.querySelector('.input-page-start').value);
-      const endVal = parseInt(row.querySelector('.input-page-end').value);
+    const cards = document.querySelectorAll('#pageManageList > .page-manage-card');
+    cards.forEach(row => {
+      const idx = parseInt(row.getAttribute('data-page-index'), 10);
+      const startVal = parseInt(row.querySelector('.input-page-start')?.value, 10);
+      const endVal = parseInt(row.querySelector('.input-page-end')?.value, 10);
       const trVal = row.querySelector('.input-page-tr')?.value.trim();
       const rcptVal = row.querySelector('.input-page-rcpt')?.value.trim();
 
@@ -1369,6 +1372,40 @@ function setupPageManager() {
           state.photos[idx].detectedRcpt = rcptVal;
           state.photos[idx].userConfirmed = true;
         }
+
+        // Collect manual sequence rows for this photo (Phase 2A)
+        const seqRows = row.querySelectorAll('[data-seq-row]');
+        const photoSeqs = [];
+        seqRows.forEach(sRow => {
+          const sNo = parseInt(sRow.querySelector('.input-seq-no')?.value, 10);
+          const fTrack = cleanTrackNo(sRow.querySelector('.input-seq-first')?.value);
+          let lTrack = cleanTrackNo(sRow.querySelector('.input-seq-last')?.value);
+          let qVal = parseInt(sRow.querySelector('.input-seq-qty')?.value, 10);
+
+          // Support single track normalization (Step 4)
+          if (fTrack && (!lTrack || lTrack === fTrack)) {
+            lTrack = fTrack;
+            if (!qVal) qVal = 1;
+          }
+
+          if (Number.isFinite(sNo) || fTrack || lTrack) {
+            photoSeqs.push({
+              rcptNo: rcptVal || state.photos[idx].detectedRcpt || null,
+              seqNo: Number.isFinite(sNo) ? sNo : null,
+              firstTrack: fTrack || null,
+              lastTrack: lTrack || null,
+              qty: Number.isFinite(qVal) ? qVal : null,
+              fieldSources: {
+                rcptNo: 'manual',
+                seqNo: 'manual',
+                firstTrack: 'manual',
+                lastTrack: 'manual',
+                qty: 'manual'
+              }
+            });
+          }
+        });
+        state.photos[idx].sequences = photoSeqs;
       }
     });
 
@@ -1377,8 +1414,128 @@ function setupPageManager() {
     renderPhotoTabs();
     renderItems();
     triggerAutoSave();
+
+    // Trigger shadow validation with updated evidence
+    if (typeof window !== 'undefined' && window.Matcher) {
+      try {
+        const paperEvidence = buildMatcherPaperEvidence(state.photos);
+        runMatcherShadowValidation(state.receiptItems, paperEvidence);
+      } catch (err) {
+        console.warn('[Matcher Shadow Error]', err);
+      }
+    }
+
     closeModal();
-    alert('บันทึกการจัดลำดับหน้าและช่วงเลขเรียบร้อยแล้ว');
+    alert('บันทึกการจัดลำดับหน้าและหลักฐานใบเสร็จเรียบร้อยแล้ว');
+  };
+}
+
+/**
+ * Evaluates validation status of a single sequence row against the track index
+ * and checks for duplicate identity (rcptNo:seqNo).
+ */
+function evaluateSequenceValidation(seq, rcptNo, allSeqs) {
+  const normFirst = cleanTrackNo(seq.firstTrack);
+  let normLast = cleanTrackNo(seq.lastTrack);
+  const seqNo = Number(seq.seqNo);
+  let qty = Number(seq.qty) || 1;
+
+  if (normFirst && (!normLast || normLast === normFirst)) {
+    normLast = normFirst;
+    if (!seq.qty) qty = 1;
+  }
+
+  // 1. Check Duplicate Identity (same rcptNo + same seqNo)
+  if (rcptNo && Number.isFinite(seqNo)) {
+    const matchingDuplicates = allSeqs.filter(item => {
+      const itemRcpt = String(item.rcptNo || '').trim();
+      const itemSeqNo = Number(item.seqNo);
+      return itemRcpt === String(rcptNo).trim() && itemSeqNo === seqNo;
+    });
+    if (matchingDuplicates.length > 1) {
+      return {
+        status: 'conflict',
+        badge: '! DUPLICATE',
+        badgeClass: 'bg-purple-100 text-purple-800 border-purple-300',
+        reasonText: `DUPLICATE / NEEDS REVIEW: เลข Seq ${seqNo} ซ้ำกันใน RCPT# ${rcptNo}`
+      };
+    }
+  }
+
+  // 2. Check completeness
+  if (!normFirst && !normLast) {
+    return {
+      status: 'weak',
+      badge: '- รอข้อมูล',
+      badgeClass: 'bg-slate-100 text-slate-600 border-slate-300',
+      reasonText: 'ยังไม่ได้ระบุ Track Anchor'
+    };
+  }
+
+  // 3. Match against API items if available
+  const hasApiItems = Array.isArray(state?.receiptItems) && state.receiptItems.length > 0;
+  if (!hasApiItems) {
+    return {
+      status: 'pending',
+      badge: 'รอ API',
+      badgeClass: 'bg-blue-50 text-blue-700 border-blue-200',
+      reasonText: 'ระบุหลักฐานแล้ว — กด "ดึง TR" เพื่อเทียบกับ API'
+    };
+  }
+
+  // Pure match evaluation via Matcher engine
+  const matcher = (typeof window !== 'undefined' && window.Matcher)
+    ? window.Matcher
+    : (typeof Matcher !== 'undefined' ? Matcher : null);
+
+  if (matcher) {
+    const { trackMap, apiTracks } = matcher.buildTrackIndex(state.receiptItems);
+    const mockSeq = {
+      rcptNo: rcptNo || null,
+      seqNo: Number.isFinite(seqNo) ? seqNo : null,
+      firstTrack: normFirst || null,
+      lastTrack: normLast || null,
+      qty: qty
+    };
+    const matched = matcher.matchSequence(mockSeq, trackMap, apiTracks);
+
+    if (matched.confidence === matcher.MATCH_CONFIDENCE.STRONG) {
+      const isSingle = normFirst === normLast && qty === 1;
+      return {
+        status: 'strong',
+        badge: '✓ STRONG',
+        badgeClass: 'bg-emerald-100 text-emerald-800 border-emerald-300',
+        reasonText: isSingle ? '✓ พบ Track ใน API ตรงกัน 1 รายการ' : `✓ พบ First/Last Track และ Qty ตรง ${matched.matchedTracks.length} รายการ`
+      };
+    } else if (matched.confidence === matcher.MATCH_CONFIDENCE.MEDIUM) {
+      return {
+        status: 'medium',
+        badge: '⚠ MEDIUM',
+        badgeClass: 'bg-amber-100 text-amber-800 border-amber-300',
+        reasonText: matched.conflictReason || '⚠ พบเฉพาะ First Track (ยังไม่ครบช่วง)'
+      };
+    } else if (matched.confidence === matcher.MATCH_CONFIDENCE.CONFLICT) {
+      return {
+        status: 'conflict',
+        badge: '✕ CONFLICT',
+        badgeClass: 'bg-rose-100 text-rose-800 border-rose-300',
+        reasonText: matched.conflictReason || '✕ ข้อมูลขัดแย้งกับรายการ API'
+      };
+    } else {
+      return {
+        status: 'weak',
+        badge: '- ไม่สมบูรณ์',
+        badgeClass: 'bg-slate-100 text-slate-600 border-slate-300',
+        reasonText: matched.conflictReason || 'ยังระบุข้อมูลไม่ครบถ้วน'
+      };
+    }
+  }
+
+  return {
+    status: 'pending',
+    badge: 'พร้อมตรวจ',
+    badgeClass: 'bg-slate-100 text-slate-700 border-slate-300',
+    reasonText: 'พร้อมส่งเข้า Matcher'
   };
 }
 
@@ -1386,10 +1543,20 @@ function renderPageManageList() {
   const container = document.getElementById('pageManageList');
   if (!container) return;
 
+  // Flatten all sequences across photos for duplicate detection
+  const allSeqs = [];
+  state.photos.forEach(p => {
+    const rcpt = String(p.detectedRcpt || '').trim();
+    (p.sequences || []).forEach(s => {
+      allSeqs.push({ ...s, rcptNo: s.rcptNo || rcpt });
+    });
+  });
+
   container.innerHTML = state.photos.map((photo, idx) => {
     const start = photo.startNo ?? '';
     const end = photo.endNo ?? '';
     const title = photo.label || `หน้า ${idx + 1}`;
+    const photoSequences = Array.isArray(photo.sequences) ? photo.sequences : [];
     
     // Check if overlap with previous photo
     let overlapBadge = '';
@@ -1404,57 +1571,230 @@ function renderPageManageList() {
       }
     }
 
+    let seqRowsHtml = '';
+    if (photoSequences.length === 0) {
+      seqRowsHtml = `
+        <div class="text-[11px] text-slate-400 italic py-2.5 text-center bg-slate-50/80 rounded-lg border border-dashed border-slate-200">
+          ยังไม่มีการระบุ Sequence สำหรับหน้านี้ — กด "+ เพิ่ม Sequence" เพื่อบันทึกหลักฐานเลขลำดับ/ช่วงแทร็กจากใบเสร็จจริง
+        </div>
+      `;
+    } else {
+      const rows = photoSequences.map((s, sIdx) => {
+        const val = evaluateSequenceValidation(s, photo.detectedRcpt, allSeqs);
+        const lTrackDisplay = (s.firstTrack && s.lastTrack && s.firstTrack === s.lastTrack) ? '' : (s.lastTrack || '');
+        return `
+          <tr class="border-b border-slate-100 hover:bg-slate-50/80 transition" data-seq-row="${sIdx}">
+            <td class="p-1 text-center">
+              <input type="number" min="1" class="input-seq-no w-12 px-1 py-1 text-xs border border-slate-300 rounded font-mono text-center bg-white"
+                     value="${s.seqNo ?? ''}" placeholder="Seq" data-page-index="${idx}" data-seq-index="${sIdx}">
+            </td>
+            <td class="p-1">
+              <input type="text" class="input-seq-first w-full min-w-[125px] px-2 py-1 text-xs border border-slate-300 rounded font-mono uppercase bg-white"
+                     value="${s.firstTrack || ''}" placeholder="First Track (เช่น EF...TH)" data-page-index="${idx}" data-seq-index="${sIdx}">
+            </td>
+            <td class="p-1">
+              <input type="text" class="input-seq-last w-full min-w-[125px] px-2 py-1 text-xs border border-slate-300 rounded font-mono uppercase bg-white"
+                     value="${lTrackDisplay}" placeholder="เว้นว่างถ้าเดี่ยว" data-page-index="${idx}" data-seq-index="${sIdx}">
+            </td>
+            <td class="p-1 text-center">
+              <input type="number" min="1" class="input-seq-qty w-12 px-1 py-1 text-xs border border-slate-300 rounded font-mono text-center bg-white"
+                     value="${s.qty ?? (s.firstTrack && !s.lastTrack ? 1 : '')}" placeholder="Qty" data-page-index="${idx}" data-seq-index="${sIdx}">
+            </td>
+            <td class="p-1">
+              <div class="seq-val-badge-container flex flex-col justify-center" data-page-index="${idx}" data-seq-index="${sIdx}">
+                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border ${val.badgeClass} w-max" title="${escapeHtml(val.reasonText)}">
+                  ${val.badge}
+                </span>
+                <span class="text-[10px] text-slate-500 block truncate max-w-[200px]" title="${escapeHtml(val.reasonText)}">
+                  ${escapeHtml(val.reasonText)}
+                </span>
+              </div>
+            </td>
+            <td class="p-1 text-center">
+              <button type="button" class="btn-delete-seq text-slate-400 hover:text-rose-600 p-1 rounded transition" title="ลบ Sequence นี้" data-page-index="${idx}" data-seq-index="${sIdx}">
+                <i class="fa-solid fa-trash-can text-xs"></i>
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+
+      seqRowsHtml = `
+        <div class="overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead>
+              <tr class="text-[10px] font-semibold text-slate-500 border-b border-slate-200 bg-slate-50">
+                <th class="p-1.5 text-center w-14">Seq#</th>
+                <th class="p-1.5">First Track</th>
+                <th class="p-1.5">Last Track (เว้นว่างถ้าเดี่ยว)</th>
+                <th class="p-1.5 text-center w-14">Qty</th>
+                <th class="p-1.5">สถานะตรวจสอบ (Matcher)</th>
+                <th class="p-1.5 text-center w-8"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows}
+            </tbody>
+          </table>
+        </div>
+      `;
+    }
+
     return `
-      <div class="flex items-center justify-between gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl" data-page-index="${idx}">
-        <div class="flex items-center gap-2 min-w-0">
-          <span class="w-6 h-6 rounded-md bg-slate-700 text-white font-mono text-xs flex items-center justify-center shrink-0">
-            ${idx + 1}
-          </span>
-          <div class="min-w-0">
-            <div class="text-xs font-semibold text-slate-800 truncate flex items-center">
-              ${escapeHtml(title)}
-              ${overlapBadge}
+      <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2.5" data-page-index="${idx}">
+        <div class="flex items-center justify-between gap-2 flex-wrap sm:flex-nowrap">
+          <div class="flex items-center gap-2 min-w-0">
+            <span class="w-6 h-6 rounded-md bg-slate-700 text-white font-mono text-xs flex items-center justify-center shrink-0">
+              ${idx + 1}
+            </span>
+            <div class="min-w-0">
+              <div class="text-xs font-semibold text-slate-800 truncate flex items-center">
+                ${escapeHtml(title)}
+                ${overlapBadge}
+              </div>
+              <div class="flex items-center gap-2 mt-1 text-[11px] text-slate-600 flex-wrap">
+                <label class="flex items-center gap-1 font-mono">
+                  <span class="text-slate-400">TR#:</span>
+                  <input type="text" placeholder="ไม่ระบุ" value="${photo.detectedTR || ''}"
+                         class="input-page-tr w-24 px-1.5 py-0.5 text-[11px] border border-slate-300 rounded font-mono bg-white">
+                </label>
+                <label class="flex items-center gap-1 font-mono">
+                  <span class="text-slate-400">RCPT#:</span>
+                  <input type="text" placeholder="ไม่ระบุ" value="${photo.detectedRcpt || ''}"
+                         class="input-page-rcpt w-20 px-1.5 py-0.5 text-[11px] border border-slate-300 rounded font-mono bg-white">
+                </label>
+              </div>
             </div>
-            <div class="flex items-center gap-2 mt-1 text-[11px] text-slate-600">
-              <label class="flex items-center gap-1 font-mono">
-                <span class="text-slate-400">TR#:</span>
-                <input type="text" placeholder="ไม่ระบุ" value="${photo.detectedTR || ''}"
-                       class="input-page-tr w-20 px-1.5 py-0.5 text-[11px] border border-slate-300 rounded font-mono bg-white">
-              </label>
-              <label class="flex items-center gap-1 font-mono">
-                <span class="text-slate-400">RCPT#:</span>
-                <input type="text" placeholder="ไม่ระบุ" value="${photo.detectedRcpt || ''}"
-                       class="input-page-rcpt w-16 px-1.5 py-0.5 text-[11px] border border-slate-300 rounded font-mono bg-white">
-              </label>
+          </div>
+
+          <div class="flex items-center gap-1.5 shrink-0 ml-auto">
+            <span class="text-[10px] text-slate-400 font-medium">ช่วงแสดงผล:</span>
+            <input type="number" min="1" placeholder="เริ่ม" value="${start}"
+                   class="input-page-start w-14 px-1.5 py-1 text-xs border border-slate-300 rounded font-mono text-center bg-white" title="ช่วงเลขลำดับแสดงผล UI">
+            <span class="text-slate-400 text-xs">–</span>
+            <input type="number" min="1" placeholder="สิ้นสุด" value="${end}"
+                   class="input-page-end w-14 px-1.5 py-1 text-xs border border-slate-300 rounded font-mono text-center bg-white" title="ช่วงเลขลำดับแสดงผล UI">
+
+            <div class="flex flex-col gap-0.5 ml-1">
+              <button type="button" class="btn-move-page-up p-1 text-[10px] bg-white border border-slate-300 hover:bg-slate-100 rounded text-slate-600 ${idx === 0 ? 'opacity-30 pointer-events-none' : ''}" title="เลื่อนขึ้น">
+                <i class="fa-solid fa-chevron-up"></i>
+              </button>
+              <button type="button" class="btn-move-page-down p-1 text-[10px] bg-white border border-slate-300 hover:bg-slate-100 rounded text-slate-600 ${idx === state.photos.length - 1 ? 'opacity-30 pointer-events-none' : ''}" title="เลื่อนลง">
+                <i class="fa-solid fa-chevron-down"></i>
+              </button>
             </div>
           </div>
         </div>
 
-        <div class="flex items-center gap-1.5 shrink-0">
-          <input type="number" min="1" placeholder="เริ่ม" value="${start}"
-                 class="input-page-start w-16 px-2 py-1 text-xs border border-slate-300 rounded font-mono text-center">
-          <span class="text-slate-400 text-xs">–</span>
-          <input type="number" min="1" placeholder="สิ้นสุด" value="${end}"
-                 class="input-page-end w-16 px-2 py-1 text-xs border border-slate-300 rounded font-mono text-center">
-          
-          <div class="flex flex-col gap-0.5 ml-1">
-            <button type="button" class="btn-move-page-up p-1 text-[10px] bg-white border border-slate-300 hover:bg-slate-100 rounded text-slate-600 ${idx === 0 ? 'opacity-30 pointer-events-none' : ''}" title="เลื่อนขึ้น">
-              <i class="fa-solid fa-chevron-up"></i>
-            </button>
-            <button type="button" class="btn-move-page-down p-1 text-[10px] bg-white border border-slate-300 hover:bg-slate-100 rounded text-slate-600 ${idx === state.photos.length - 1 ? 'opacity-30 pointer-events-none' : ''}" title="เลื่อนลง">
-              <i class="fa-solid fa-chevron-down"></i>
+        <div class="bg-white border border-slate-200/80 rounded-lg p-2.5">
+          <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-1.5">
+              <i class="fa-solid fa-list-ol text-blue-600 text-xs"></i>
+              <span class="text-xs font-bold text-slate-700">หลักฐาน Sequence บนกระดาษ (Receipt Sequences)</span>
+              <span class="text-[10px] text-slate-400">(${photoSequences.length} รายการ)</span>
+            </div>
+            <button type="button" class="btn-add-sequence px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded text-[11px] font-semibold flex items-center gap-1 transition" data-page-index="${idx}">
+              <i class="fa-solid fa-plus text-[10px]"></i> เพิ่ม Sequence
             </button>
           </div>
+          ${seqRowsHtml}
         </div>
       </div>
     `;
   }).join('');
 
-  // Attach move up / move down handlers
+  // Wire up sequence inputs live validation & data synchronization
+  const updateAllSequenceBadges = () => {
+    const freshAllSeqs = [];
+    state.photos.forEach((p, pI) => {
+      const pageEl = container.querySelector(`[data-page-index="${pI}"]`);
+      const rcpt = pageEl?.querySelector('.input-page-rcpt')?.value.trim() || String(p.detectedRcpt || '').trim();
+      (p.sequences || []).forEach(s => {
+        freshAllSeqs.push({ ...s, rcptNo: s.rcptNo || rcpt });
+      });
+    });
+
+    state.photos.forEach((p, pI) => {
+      const pageEl = container.querySelector(`[data-page-index="${pI}"]`);
+      const rcpt = pageEl?.querySelector('.input-page-rcpt')?.value.trim() || String(p.detectedRcpt || '').trim();
+      (p.sequences || []).forEach((s, sI) => {
+        const badgeContainer = container.querySelector(`.seq-val-badge-container[data-page-index="${pI}"][data-seq-index="${sI}"]`);
+        if (badgeContainer) {
+          const val = evaluateSequenceValidation(s, rcpt, freshAllSeqs);
+          badgeContainer.innerHTML = `
+            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border ${val.badgeClass} w-max" title="${escapeHtml(val.reasonText)}">
+              ${val.badge}
+            </span>
+            <span class="text-[10px] text-slate-500 block truncate max-w-[200px]" title="${escapeHtml(val.reasonText)}">
+              ${escapeHtml(val.reasonText)}
+            </span>
+          `;
+        }
+      });
+    });
+  };
+
+  // Live input events on sequences
+  container.querySelectorAll('input.input-seq-no, input.input-seq-first, input.input-seq-last, input.input-seq-qty').forEach(inp => {
+    inp.addEventListener('input', (e) => {
+      const pIdx = parseInt(e.target.getAttribute('data-page-index'), 10);
+      const sIdx = parseInt(e.target.getAttribute('data-seq-index'), 10);
+      if (state.photos[pIdx]?.sequences?.[sIdx]) {
+        const row = e.target.closest('[data-seq-row]');
+        if (row) {
+          state.photos[pIdx].sequences[sIdx].seqNo = parseInt(row.querySelector('.input-seq-no')?.value, 10) || null;
+          state.photos[pIdx].sequences[sIdx].firstTrack = cleanTrackNo(row.querySelector('.input-seq-first')?.value);
+          state.photos[pIdx].sequences[sIdx].lastTrack = cleanTrackNo(row.querySelector('.input-seq-last')?.value);
+          state.photos[pIdx].sequences[sIdx].qty = parseInt(row.querySelector('.input-seq-qty')?.value, 10) || null;
+          updateAllSequenceBadges();
+        }
+      }
+    });
+  });
+
+  // Live input events on page RCPT
+  container.querySelectorAll('input.input-page-rcpt').forEach(inp => {
+    inp.addEventListener('input', () => {
+      updateAllSequenceBadges();
+    });
+  });
+
+  // Add sequence buttons
+  container.querySelectorAll('.btn-add-sequence').forEach(btn => {
+    btn.onclick = (e) => {
+      const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
+      if (!Array.isArray(state.photos[pIdx].sequences)) {
+        state.photos[pIdx].sequences = [];
+      }
+      const maxSeq = state.photos[pIdx].sequences.reduce((max, cur) => Math.max(max, Number(cur.seqNo) || 0), 0);
+      state.photos[pIdx].sequences.push({
+        seqNo: maxSeq + 1,
+        firstTrack: '',
+        lastTrack: '',
+        qty: 1,
+        fieldSources: { rcptNo: 'manual', seqNo: 'manual', firstTrack: 'manual', lastTrack: 'manual', qty: 'manual' }
+      });
+      renderPageManageList();
+    };
+  });
+
+  // Delete sequence buttons
+  container.querySelectorAll('.btn-delete-seq').forEach(btn => {
+    btn.onclick = (e) => {
+      const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
+      const sIdx = parseInt(e.currentTarget.getAttribute('data-seq-index'), 10);
+      if (state.photos[pIdx]?.sequences) {
+        state.photos[pIdx].sequences.splice(sIdx, 1);
+        renderPageManageList();
+      }
+    };
+  });
+
+  // Page move handlers
   container.querySelectorAll('.btn-move-page-up').forEach(btn => {
     btn.onclick = (e) => {
       const row = e.target.closest('[data-page-index]');
-      const idx = parseInt(row.getAttribute('data-page-index'));
+      const idx = parseInt(row.getAttribute('data-page-index'), 10);
       if (idx > 0) {
         const temp = state.photos[idx];
         state.photos[idx] = state.photos[idx - 1];
@@ -1467,7 +1807,7 @@ function renderPageManageList() {
   container.querySelectorAll('.btn-move-page-down').forEach(btn => {
     btn.onclick = (e) => {
       const row = e.target.closest('[data-page-index]');
-      const idx = parseInt(row.getAttribute('data-page-index'));
+      const idx = parseInt(row.getAttribute('data-page-index'), 10);
       if (idx < state.photos.length - 1) {
         const temp = state.photos[idx];
         state.photos[idx] = state.photos[idx + 1];
@@ -2271,6 +2611,286 @@ async function fetchTrackingByTR(trNumber) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MATCHER ENGINE — SHADOW MODE ADAPTER (Phase 1 & Phase 1.5 & Phase 2A)
+// Non-blocking, isolated, zero state mutation.
+// ─────────────────────────────────────────────────────────────────────────────
+let matcherShadowResult = null; // In-memory diagnostic only, never stored in DB or localStorage
+
+/**
+ * buildMatcherPaperEvidence:
+ * Pure adapter converting existing photo metadata and manual sequence evidence
+ * into structured paper evidence.
+ *
+ * Provenance Rules:
+ * - If photo has userConfirmed: source = 'manual'
+ * - If photo has detectedRcpt without userConfirmed: source = 'ocr'
+ * - If neither: rcptNo = null, source = null
+ * - Sequences/Tracks: extracted from photo.sequences (manual evidence) or explicitly provided.
+ * - Strictly NO seqNo from item.no, apiIndex+1, or photo.startNo.
+ * - Strictly NO firstTrack/lastTrack generated from API array via arithmetic.
+ *
+ * @param {object[]|null} photos
+ * @returns {{ trNo: string|null, rcptNo: string|null, rcptSource: string|null, rcptList: object[], sequences: object[] }}
+ */
+function buildMatcherPaperEvidence(photos) {
+  if (!Array.isArray(photos) || photos.length === 0) {
+    return {
+      trNo: null,
+      rcptNo: null,
+      rcptSource: null,
+      rcptList: [],
+      sequences: []
+    };
+  }
+
+  let detectedTR = null;
+  const rcptMap = new Map(); // rcptNo -> { rcptNo, source, photoIndices: [] }
+  const allSequences = [];
+  const seqIdentityCounts = new Map(); // "rcptNo:seqNo" -> count
+
+  photos.forEach((photo, idx) => {
+    if (!photo) return;
+
+    if (!detectedTR && photo.detectedTR) {
+      detectedTR = String(photo.detectedTR).trim();
+    }
+
+    let photoRcpt = null;
+    let photoSource = 'ocr';
+    if (photo.detectedRcpt) {
+      photoRcpt = String(photo.detectedRcpt).trim();
+      photoSource = Boolean(photo.userConfirmed) ? 'manual' : 'ocr';
+
+      if (!rcptMap.has(photoRcpt)) {
+        rcptMap.set(photoRcpt, { rcptNo: photoRcpt, source: photoSource, photoIndices: [idx] });
+      } else {
+        const existing = rcptMap.get(photoRcpt);
+        existing.photoIndices.push(idx);
+        // Priority: MANUAL > OCR
+        if (photoSource === 'manual' && existing.source !== 'manual') {
+          existing.source = 'manual';
+        }
+      }
+    }
+
+    // Process manual sequences attached to this photo (Phase 2A)
+    if (Array.isArray(photo.sequences)) {
+      photo.sequences.forEach(s => {
+        if (!s) return;
+        const sRcpt = s.rcptNo ? String(s.rcptNo).trim() : photoRcpt;
+        const sSeqNo = (s.seqNo !== null && s.seqNo !== undefined && s.seqNo !== '') ? Number(s.seqNo) : null;
+
+        // Clean tracking numbers (whitespace & uppercase ONLY, Step 5)
+        let normFirst = cleanTrackNo(s.firstTrack);
+        let normLast = cleanTrackNo(s.lastTrack);
+        let qty = (s.qty !== null && s.qty !== undefined && s.qty !== '') ? Number(s.qty) : null;
+
+        // Support Single Track normalization (Step 4)
+        if (normFirst && (!normLast || normLast === normFirst)) {
+          normLast = normFirst;
+          if (qty === null || qty === undefined || isNaN(qty) || qty <= 0) qty = 1;
+        }
+
+        const seqObj = {
+          rcptNo: sRcpt,
+          seqNo: sSeqNo,
+          firstTrack: normFirst || null,
+          lastTrack: normLast || null,
+          qty: qty,
+          fieldSources: {
+            rcptNo: s.fieldSources?.rcptNo || (sRcpt === photoRcpt ? photoSource : 'manual'),
+            seqNo: s.fieldSources?.seqNo || 'manual',
+            firstTrack: s.fieldSources?.firstTrack || 'manual',
+            lastTrack: s.fieldSources?.lastTrack || 'manual',
+            qty: s.fieldSources?.qty || 'manual'
+          }
+        };
+
+        // Track compound identity for duplicate protection (Step 7 & Step 11)
+        if (seqObj.rcptNo && seqObj.seqNo !== null && Number.isFinite(seqObj.seqNo)) {
+          const compKey = `${seqObj.rcptNo}:${seqObj.seqNo}`;
+          seqIdentityCounts.set(compKey, (seqIdentityCounts.get(compKey) || 0) + 1);
+        }
+
+        allSequences.push(seqObj);
+      });
+    }
+  });
+
+  // Flag duplicate same RCPT + same seqNo (Step 11)
+  allSequences.forEach(seq => {
+    if (seq.rcptNo && seq.seqNo !== null && Number.isFinite(seq.seqNo)) {
+      const compKey = `${seq.rcptNo}:${seq.seqNo}`;
+      if ((seqIdentityCounts.get(compKey) || 0) > 1) {
+        seq.isDuplicate = true;
+        seq.duplicateReason = `DUPLICATE / NEEDS REVIEW: Same seqNo (${seq.seqNo}) appears multiple times under RCPT# ${seq.rcptNo}`;
+      }
+    }
+  });
+
+  const rcptList = Array.from(rcptMap.values());
+
+  return {
+    trNo: detectedTR,
+    rcptNo: rcptList.length === 1 ? rcptList[0].rcptNo : null,
+    rcptSource: rcptList.length === 1 ? rcptList[0].source : null,
+    rcptList,
+    sequences: allSequences
+  };
+}
+
+/**
+ * buildMatcherShadowInput:
+ * Prepares input for Matcher.matchAll() with strict separation of API Track Data
+ * and Receipt Evidence.
+ *
+ * Rules:
+ * 1. ApiTrack comes from API response items only (cleanTrackNo).
+ * 2. Sequences and RCPT# come from paper evidence only (e.g. OCR/manual).
+ * 3. NEVER use item.no as seqNo (item.no is 1-based array index, not paper sequence).
+ * 4. NEVER use API array order as paper sequence.
+ * 5. If no paper evidence exists, sequences is empty or seqNo is null. No fake sequences.
+ *
+ * @param {object[]|null} rawApiItems
+ * @param {object|object[]|null} paperEvidence
+ * @returns {{ trNo: string, rcptNo: string|null, rcptSource: string|null, rcptList: object[], apiItems: object[], sequences: object[] }}
+ */
+function buildMatcherShadowInput(rawApiItems = null, paperEvidence = null) {
+  const trInputEl = typeof document !== 'undefined' ? document.getElementById('trNumberInput') : null;
+  const currentTrVal = trInputEl && trInputEl.value ? trInputEl.value.trim() : '';
+
+  // Extract paper evidence if passed, or build from state.photos
+  let evidence;
+  if (paperEvidence && typeof paperEvidence === 'object' && !Array.isArray(paperEvidence)) {
+    evidence = paperEvidence;
+  } else if (Array.isArray(paperEvidence)) {
+    evidence = { sequences: paperEvidence, rcptList: [], rcptNo: null, rcptSource: null, trNo: null };
+  } else {
+    evidence = buildMatcherPaperEvidence(state?.photos);
+  }
+
+  const trNo = currentTrVal || evidence?.trNo || '';
+
+  // 1. API Items: from passed argument or state.receiptItems
+  const sourceItems = Array.isArray(rawApiItems)
+    ? rawApiItems
+    : (Array.isArray(state?.receiptItems) ? state.receiptItems : []);
+
+  const apiItems = sourceItems
+    .map(item => {
+      if (!item) return null;
+      const barcode = cleanTrackNo(item.barcode || item.track_no || item.trackNo);
+      return barcode ? { barcode, raw: item } : null;
+    })
+    .filter(Boolean);
+
+  // 2. Receipt Sequences: strictly from paper evidence, never fabricated
+  let sequences = [];
+  if (Array.isArray(evidence?.sequences)) {
+    sequences = evidence.sequences;
+  }
+
+  return {
+    trNo,
+    rcptNo: evidence?.rcptNo || null,
+    rcptSource: evidence?.rcptSource || null,
+    rcptList: evidence?.rcptList || [],
+    apiItems,
+    sequences
+  };
+}
+
+/**
+ * runMatcherShadowValidation:
+ * Executes Matcher.matchAll() in shadow mode with Mutation Guard.
+ * Does NOT mutate state.receiptItems, photo ranges, item.no, or UI.
+ * Wrapped in fail-safe try-catch so it never breaks app execution.
+ *
+ * @param {object[]|null} rawApiItems
+ * @param {object|object[]|null} paperEvidence
+ * @returns {object|null} shadow result diagnostics
+ */
+function runMatcherShadowValidation(rawApiItems = null, paperEvidence = null) {
+  const matcher = (typeof window !== 'undefined' && window.Matcher)
+    ? window.Matcher
+    : (typeof Matcher !== 'undefined' ? Matcher : null);
+
+  if (!matcher || typeof matcher.matchAll !== 'function') {
+    return null;
+  }
+
+  // ── Step 8: Mutation Guard Snapshot ──────────────────────────────────────
+  const itemsBefore = JSON.stringify(state?.receiptItems || []);
+  const photosBefore = JSON.stringify((state?.photos || []).map(p => ({
+    label: p.label,
+    detectedTR: p.detectedTR,
+    detectedRcpt: p.detectedRcpt,
+    startNo: p.startNo,
+    endNo: p.endNo,
+    userConfirmed: p.userConfirmed
+  })));
+
+  const input = buildMatcherShadowInput(rawApiItems, paperEvidence);
+  const result = matcher.matchAll(input);
+
+  // Enforce duplicate protection on matched groups (Step 11)
+  if (result && Array.isArray(result.groups)) {
+    result.groups.forEach(group => {
+      if (Array.isArray(group.sequences)) {
+        group.sequences.forEach(seq => {
+          if (seq.isDuplicate) {
+            seq.confidence = matcher.MATCH_CONFIDENCE.CONFLICT;
+            seq.conflictReason = seq.duplicateReason || `DUPLICATE / NEEDS REVIEW: Same seqNo (${seq.seqNo}) appears multiple times under RCPT# ${seq.rcptNo}`;
+          }
+        });
+      }
+    });
+  }
+
+  // Verify deep equality post-execution
+  const itemsAfter = JSON.stringify(state?.receiptItems || []);
+  const photosAfter = JSON.stringify((state?.photos || []).map(p => ({
+    label: p.label,
+    detectedTR: p.detectedTR,
+    detectedRcpt: p.detectedRcpt,
+    startNo: p.startNo,
+    endNo: p.endNo,
+    userConfirmed: p.userConfirmed
+  })));
+
+  if (itemsBefore !== itemsAfter || photosBefore !== photosAfter) {
+    console.error('[Matcher Shadow] CRITICAL MUTATION GUARD: State was modified during shadow run!');
+    throw new Error('STATE_MUTATION_DETECTED');
+  }
+
+  matcherShadowResult = {
+    timestamp: new Date().toISOString(),
+    inputSummary: {
+      trNo: input.trNo,
+      rcptNo: input.rcptNo,
+      rcptSource: input.rcptSource,
+      rcptList: input.rcptList,
+      apiItemsCount: input.apiItems.length,
+      sequencesCount: input.sequences.length,
+      hasSequenceEvidence: input.sequences.length > 0,
+      hasRangeEvidence: input.sequences.some(s => s.firstTrack && s.lastTrack && s.firstTrack !== s.lastTrack)
+    },
+    output: result,
+    mutationGuardPassed: true
+  };
+
+  return matcherShadowResult;
+}
+
+if (typeof window !== 'undefined') {
+  window.buildMatcherPaperEvidence = buildMatcherPaperEvidence;
+  window.buildMatcherShadowInput = buildMatcherShadowInput;
+  window.runMatcherShadowValidation = runMatcherShadowValidation;
+  window.evaluateSequenceValidation = evaluateSequenceValidation;
+  window.getMatcherShadowResult = () => matcherShadowResult;
+}
+
 function processApiItems(items) {
   const nextReceiptItems = [];
 
@@ -2315,6 +2935,18 @@ function processApiItems(items) {
   renderItems();
   updateStats();
   triggerAutoSave();
+
+  // ── Matcher Integration: Phase 1 & 1.5 Shadow Mode Validation ───────────
+  // Runs in background without mutating receiptItems, photos, item.no, or UI.
+  if (typeof window !== 'undefined' && window.Matcher) {
+    try {
+      const paperEvidence = buildMatcherPaperEvidence(state.photos);
+      const shadowResult = runMatcherShadowValidation(items, paperEvidence);
+      console.debug('[Matcher Shadow]', shadowResult);
+    } catch (err) {
+      console.warn('[Matcher Shadow Error]', err);
+    }
+  }
 }
 
 function setupEventListeners() {

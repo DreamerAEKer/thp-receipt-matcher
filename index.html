@@ -401,13 +401,13 @@
 
   <!-- MODAL: PAGE SEQUENCE MANAGER -->
   <div id="pageManageModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 z-50 hidden">
-    <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+    <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-4xl overflow-hidden flex flex-col max-h-[90vh]">
       <div class="bg-gradient-to-r from-slate-800 to-slate-900 text-white px-4 py-3 flex items-center justify-between shrink-0">
         <div class="flex items-center gap-2">
           <i class="fa-solid fa-layer-group text-amber-400"></i>
           <div>
-            <h3 class="font-bold text-sm">จัดการลำดับหน้าและช่วงเลขใบเสร็จ</h3>
-            <p class="text-[10px] text-white/70">กำหนดช่วงเลข (Sequence Range) เพื่อเรียงหน้าใบเสร็จและจับคู่ Track ให้ถูกต้อง</p>
+            <h3 class="font-bold text-sm">จัดการลำดับหน้าและหลักฐานใบเสร็จ (Receipt Evidence Manager)</h3>
+            <p class="text-[10px] text-white/70">กำหนด TR#, RCPT# และระบุหลักฐาน Sequence / Track Range จากกระดาษจริงเพื่อตรวจสอบความถูกต้องกับ API (Validation Only)</p>
           </div>
         </div>
         <button id="btnClosePageManage" class="text-white/80 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
@@ -416,7 +416,7 @@
       <div class="p-3 bg-amber-50 border-b border-amber-200/60 text-amber-900 text-xs flex items-start gap-2">
         <i class="fa-solid fa-circle-info text-amber-600 mt-0.5 shrink-0"></i>
         <div class="leading-relaxed text-[11px]">
-          กำหนดช่วงลำดับเลขที่ปรากฏในแต่ละรูป เช่น <code class="font-mono bg-amber-100 px-1 rounded">1-6</code>, <code class="font-mono bg-amber-100 px-1 rounded">7-16</code>, <code class="font-mono bg-amber-100 px-1 rounded">16-26</code> (รอยต่อเลขซ้ำแสดงว่าเป็นหน้าต่อกัน) หากลำดับกลับมาเริ่มที่ 1 ระบบจะจัดเป็นใบเสร็จถัดไปใน TR เดียวกัน
+          ระบุหลักฐานตามที่พิมพ์บนกระดาษจริง (เช่น รายการเดี่ยวใส่ First Track และ Qty=1 หรือช่วงแทร็กใส่ First Track, Last Track และ Qty) เพื่อให้ Matcher Engine ตรวจสอบความถูกต้องกับข้อมูล API โดยไม่มีการดัดแปลงหรือบังคับแก้ไขรายการอัตโนมัติ
         </div>
       </div>
 
@@ -568,6 +568,7 @@
   </div>
 
   <!-- SCRIPTS -->
+  <script src="matcher.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
