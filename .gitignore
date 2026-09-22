@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Temporary local test scripts
+test_api_error_handling.js
+test_inspector_browser.js
+test_ocr_real.js
+verify_browser.js
+
+# Logs
+*.log
+
+# OS / editor temporary files
+.DS_Store
+Thumbs.db
