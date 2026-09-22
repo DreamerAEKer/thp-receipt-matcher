@@ -31,6 +31,258 @@ const state = {
   editorDisplayRatio: 1
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// [DEBUG] API Structure Inspector — TEMPORARY — Remove after analysis complete
+// Does NOT store anything in IndexedDB/History. No PII dumped.
+// ─────────────────────────────────────────────────────────────────────────────
+let _debugApiReport = null; // in-memory only, cleared on page reload
+
+function _maskTrackNo(raw) {
+  // Show only first 2 chars + last 3 chars, mask the middle
+  const s = String(raw || '').replace(/\s+/g, '').toUpperCase();
+  if (s.length <= 5) return s;
+  return s.slice(0, 2) + '*'.repeat(s.length - 5) + s.slice(-3);
+}
+
+function _schemaOf(obj) {
+  if (obj === null) return 'null';
+  if (Array.isArray(obj)) return `Array(${obj.length})`;
+  if (typeof obj !== 'object') return typeof obj;
+  return `Object{${Object.keys(obj).join(', ')}}`;
+}
+
+function _inspectItemSample(item, label) {
+  if (!item) return `  ${label}: (empty)\n`;
+  const fieldNames = Object.keys(item);
+  // Detect which field looks like a tracking number (barcode-like: contains letters + digits)
+  const trackFieldGuess = fieldNames.find(k => /barcode|track|code/i.test(k));
+  const rcptFieldGuess  = fieldNames.find(k => /rcpt|receipt|rec_no|receiptno/i.test(k));
+  const seqFieldGuess   = fieldNames.find(k => /seq|no\b|order|line|sort/i.test(k));
+  const qtyFieldGuess   = fieldNames.find(k => /qty|quantity|count|amount|weight/i.test(k));
+  const svcFieldGuess   = fieldNames.find(k => /service|svc|type/i.test(k));
+
+  let out = `  ${label} — fields (${fieldNames.length}): [${fieldNames.join(', ')}]\n`;
+  out += `    → likely tracking field : ${trackFieldGuess || '(none matched)'}\n`;
+  out += `    → likely rcpt    field  : ${rcptFieldGuess  || '(none matched)'}\n`;
+  out += `    → likely seq/no  field  : ${seqFieldGuess   || '(none matched)'}\n`;
+  out += `    → likely qty     field  : ${qtyFieldGuess   || '(none matched)'}\n`;
+  out += `    → likely service field  : ${svcFieldGuess   || '(none matched)'}\n`;
+  if (trackFieldGuess) {
+    const rawVal = item[trackFieldGuess];
+    if (rawVal) out += `    → track sample (masked): ${_maskTrackNo(rawVal)}\n`;
+  }
+  return out;
+}
+
+function inspectRawApiResponse(json, httpStatus = 200) {
+  const lines = [];
+
+  // ── TOP LEVEL ───────────────────────────────────────────────────────────────
+  lines.push('═══════════════════════════════════════════════════');
+  lines.push(' [DEBUG] Thailand Post API — Structure Report');
+  lines.push(' ' + new Date().toLocaleString('th-TH'));
+  lines.push('═══════════════════════════════════════════════════\n');
+
+  // Summary Header
+  const apiStatusVal = (json && typeof json === 'object' && 'status' in json) ? String(json.status) : '(absent)';
+  const apiMsgVal = (json && typeof json === 'object' && json.message) ? String(json.message) : '';
+  const isApiError = (json && typeof json === 'object' && json.status === false);
+  const resultLabel = isApiError
+    ? (/quota/i.test(apiMsgVal) ? 'API_ERROR / QUOTA_EXCEEDED' : 'API_ERROR')
+    : (httpStatus === 200 ? 'SUCCESS' : 'HTTP_ERROR');
+
+  lines.push(`HTTP: ${httpStatus}`);
+  lines.push(`API STATUS: ${apiStatusVal}`);
+  lines.push(`RESULT: ${resultLabel}`);
+  if (apiMsgVal) {
+    lines.push(`MESSAGE: ${apiMsgVal}`);
+  }
+  lines.push('───────────────────────────────────────────────────\n');
+
+  lines.push(`[HTTP STATUS]     ${httpStatus}`);
+  const responseType = json === null ? 'null' : Array.isArray(json) ? 'Array' : typeof json;
+  lines.push(`[RESPONSE TYPE]   ${responseType}`);
+
+  const topKeys = (json && typeof json === 'object') ? Object.keys(json) : [];
+  lines.push(`[TOP-LEVEL KEYS]  ${topKeys.length > 0 ? topKeys.join(', ') : '(none)'}\n`);
+
+  // Safe Top-Level Status / Message / Error extraction
+  if (json && typeof json === 'object') {
+    if ('status' in json) {
+      lines.push(`  status          : ${JSON.stringify(json.status)}`);
+    }
+    if ('message' in json) {
+      lines.push(`  message         : ${JSON.stringify(json.message)}`);
+    }
+    const errField = topKeys.find(k => /err|code/i.test(k) && k !== 'barcode');
+    if (errField && errField !== 'status' && errField !== 'message') {
+      lines.push(`  ${errField}           : ${JSON.stringify(json[errField])}`);
+    }
+    lines.push('');
+  }
+
+  const resp = json?.response;
+  if (resp === undefined || resp === null) {
+    lines.push('⚠ json.response is absent, null, or undefined!');
+    lines.push('  → API did not return a response payload for this request.\n');
+    lines.push('═══════════════════════════════════════════════════');
+    lines.push(' END OF REPORT (EMPTY RESPONSE)');
+    lines.push('═══════════════════════════════════════════════════');
+    _debugApiReport = lines.join('\n');
+    _notifyInspectorReady();
+    return;
+  }
+
+  const respKeys = typeof resp === 'object' && resp !== null ? Object.keys(resp) : [];
+  lines.push(`[response.* keys] ${respKeys.length > 0 ? respKeys.join(', ') : '(none/empty object)'}\n`);
+
+  // ── G1: items vs receipts ────────────────────────────────────────────────
+  lines.push('─── G1: items / receipts ───────────────────────────');
+  const hasItems    = Array.isArray(resp.items);
+  const itemsCount  = hasItems ? resp.items.length : 0;
+  const hasReceipts = resp.receipts !== undefined && resp.receipts !== null;
+  lines.push(`  response.items    : ${hasItems ? `Array(${itemsCount})` : '(absent or not array)'}`);
+  lines.push(`  response.receipts : ${hasReceipts ? _schemaOf(resp.receipts) : '(absent)'}\n`);
+
+  if (!hasItems && !hasReceipts) {
+    lines.push('⚠ Neither response.items nor response.receipts found!');
+    lines.push(`  Raw typeof response: ${typeof resp}`);
+  }
+
+  // ── G2, G3, G4: receipts structure ───────────────────────────────────────
+  if (hasReceipts) {
+    lines.push('─── G2/G3: receipts structure ──────────────────────');
+    const receiptsType = Array.isArray(resp.receipts) ? 'Array' : 'Object';
+    lines.push(`  type : ${receiptsType}`);
+
+    if (receiptsType === 'Object') {
+      const groupKeys = Object.keys(resp.receipts);
+      lines.push(`  keys (receipt groups): [${groupKeys.join(', ')}]`);
+      lines.push(`  number of groups: ${groupKeys.length}`);
+
+      // Heuristic: does each key look like a RCPT# (numeric, 4-10 digits)?
+      const numericKeys = groupKeys.filter(k => /^\d{4,10}$/.test(k.trim()));
+      lines.push(`  keys that look like RCPT# (pure numeric 4-10 digits): ${numericKeys.length}/${groupKeys.length}`);
+      lines.push(`  RCPT# pattern match: ${numericKeys.length === groupKeys.length ? 'YES — all keys appear to be RCPT#' : numericKeys.length > 0 ? 'PARTIAL' : 'NO'}\n`);
+
+      // G3: multiple groups?
+      lines.push(`  → G3 (multiple RCPT groups?): ${groupKeys.length > 1 ? `YES — ${groupKeys.length} groups` : 'SINGLE group only'}\n`);
+
+      groupKeys.forEach((gKey, gi) => {
+        const group = resp.receipts[gKey];
+        lines.push(`  ── Group [${gi + 1}] key="${gKey}" ──`);
+        lines.push(`     type: ${_schemaOf(group)}`);
+
+        // group can be an Object{barcode: [statuses]} or Array
+        if (!Array.isArray(group) && typeof group === 'object' && group !== null) {
+          const barcodes = Object.keys(group);
+          lines.push(`     tracks in group: ${barcodes.length}`);
+          lines.push(`     first track key (masked): ${_maskTrackNo(barcodes[0] || '')}`);
+          lines.push(`     last  track key (masked): ${_maskTrackNo(barcodes[barcodes.length - 1] || '')}`);
+
+          // G4: inspect first and last item schema
+          const firstKey = barcodes[0];
+          const lastKey  = barcodes[barcodes.length - 1];
+          const firstStatuses = group[firstKey];
+          const firstItem = Array.isArray(firstStatuses) ? firstStatuses.at(-1) : firstStatuses;
+          const lastStatuses  = group[lastKey];
+          const lastItem  = Array.isArray(lastStatuses)  ? lastStatuses.at(-1)  : lastStatuses;
+
+          lines.push(`     entry type: ${Array.isArray(firstStatuses) ? `Array(${firstStatuses.length}) of statuses` : _schemaOf(firstStatuses)}\n`);
+          lines.push(_inspectItemSample(firstItem, 'FIRST item schema'));
+          lines.push(_inspectItemSample(lastItem,  'LAST item schema'));
+
+        } else if (Array.isArray(group)) {
+          lines.push(`     tracks in group (array): ${group.length}`);
+          lines.push(_inspectItemSample(group[0], 'FIRST item schema'));
+          lines.push(_inspectItemSample(group[group.length - 1], 'LAST item schema'));
+        }
+      });
+    } else {
+      // Array of receipts
+      lines.push(`  Array length: ${resp.receipts.length}`);
+      lines.push(_inspectItemSample(resp.receipts[0], 'FIRST receipt schema'));
+    }
+  } else {
+    lines.push('─── G2/G3: (no receipts object) ────────────────────\n');
+  }
+
+  // ── G5/G6: flat items (if present) ──────────────────────────────────────
+  if (hasItems && resp.items.length > 0) {
+    lines.push('─── G4/G5/G6: flat items array ─────────────────────');
+    lines.push(`  total items: ${resp.items.length}`);
+    lines.push(_inspectItemSample(resp.items[0], 'FIRST item schema'));
+    lines.push(_inspectItemSample(resp.items[resp.items.length - 1], 'LAST item schema'));
+
+    // G5: sequence field?
+    const firstItem = resp.items[0] || {};
+    const seqGuess = Object.keys(firstItem).find(k => /seq|no\b|order|line|sort|idx/i.test(k));
+    lines.push(`  G5 (sequence field from POS?): ${seqGuess ? `field "${seqGuess}" exists — value type: ${typeof firstItem[seqGuess]}` : 'NO — no obvious sequence field found (frontend must derive)'}\n`);
+
+    // G6: quantity/range field?
+    const qtyGuess = Object.keys(firstItem).find(k => /qty|quantity|count|range|from|to\b/i.test(k));
+    lines.push(`  G6 (quantity/range field?): ${qtyGuess ? `field "${qtyGuess}" — sample type: ${typeof firstItem[qtyGuess]}` : 'NO — no quantity/range field found'}`);
+  }
+
+  // ── G7: RCPT boundary preservable? ──────────────────────────────────────
+  lines.push('\n─── G7: RCPT boundary preservable? ─────────────────');
+  if (hasReceipts && !Array.isArray(resp.receipts)) {
+    const gKeys = Object.keys(resp.receipts);
+    lines.push(`  OBSERVED: receipts Object has ${gKeys.length} key(s)`);
+    lines.push(`  → If keys are RCPT#: YES — boundary can be preserved from API without OCR`);
+    lines.push(`  → Current extractReceiptApiItems() discards this key (Object.values) → must fix`);
+  } else if (hasItems && !hasReceipts) {
+    lines.push(`  OBSERVED: only flat items array — no receipt grouping`);
+    lines.push(`  → RCPT# must come from OCR (header) or manual input`);
+  } else {
+    lines.push(`  INCONCLUSIVE — both or neither present`);
+  }
+
+  // ── Order preservation note ──────────────────────────────────────────────
+  lines.push('\n─── JS Object key order note ───────────────────────');
+  lines.push('  In modern V8/SpiderMonkey, Object.keys() preserves insertion order');
+  lines.push('  for non-integer string keys (e.g. "RJ317132454TH").');
+  lines.push('  For RCPT group keys (if numeric strings like "18101"), integer-like');
+  lines.push('  keys are sorted numerically first — may or may not match receipt order.\n');
+
+  lines.push('═══════════════════════════════════════════════════');
+  lines.push(' END OF REPORT — OBSERVED FROM LIVE API');
+  lines.push('═══════════════════════════════════════════════════');
+
+  _debugApiReport = lines.join('\n');
+  _notifyInspectorReady();
+}
+
+function _notifyInspectorReady() {
+  const btn = document.getElementById('btnApiInspector');
+  if (btn) {
+    btn.classList.remove('hidden');
+    btn.classList.add('flex', 'ring-2', 'ring-amber-500');
+  }
+  console.log('[DEBUG] API Inspector report ready — click the 🔬 button in navbar to view');
+}
+
+function _setupApiInspector() {
+  const modal      = document.getElementById('apiInspectorModal');
+  const body       = document.getElementById('apiInspectorBody');
+  const btnOpen    = document.getElementById('btnApiInspector');
+  const btnClose   = document.getElementById('btnCloseApiInspector');
+
+  if (!modal || !btnOpen || !btnClose) return;
+
+  btnOpen.onclick = () => {
+    body.textContent = _debugApiReport || 'ยังไม่มีข้อมูล — กด "ดึง TR" ก่อน';
+    modal.classList.remove('hidden');
+  };
+  btnClose.onclick = () => modal.classList.add('hidden');
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// END [DEBUG] API Structure Inspector
+// ─────────────────────────────────────────────────────────────────────────────
+
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('labelZipPrefix').textContent = '(' + state.defaultZipPrefix + ')';
@@ -44,12 +296,39 @@ document.addEventListener('DOMContentLoaded', () => {
   setupCornerCropEditor();
   setupApiModal();
   setupHistory();
+  setupPageManager();
   setupMobileTabs();
+  _setupApiInspector();
   renderPhotoTabs();
   renderItems();
   updateStats();
   showEmptyPhotoState();
+
+  // Auto-restore latest session if available
+  autoRestoreLatestSession();
 });
+
+async function autoRestoreLatestSession() {
+  try {
+    const latestId = localStorage.getItem('thp_latest_session_id');
+    let recordToRestore = null;
+    if (latestId) {
+      recordToRestore = await getHistoryById(latestId);
+    }
+    if (!recordToRestore) {
+      const allRecords = await getAllHistory();
+      if (allRecords.length > 0) {
+        recordToRestore = allRecords[0];
+      }
+    }
+    if (recordToRestore) {
+      await restoreHistory(recordToRestore.id);
+      updateAutoSaveIndicator('saved');
+    }
+  } catch (err) {
+    console.warn('AutoRestore warning:', err);
+  }
+}
 
 function cleanTrackNo(val) {
   if (!val) return '';
@@ -58,7 +337,40 @@ function cleanTrackNo(val) {
 
 const receiptPhotoCollator = new Intl.Collator('th', { numeric: true, sensitivity: 'base' });
 
+function parseRangeFromFilename(name) {
+  if (!name) return null;
+  // Look for patterns like "1-7", "1_7", "16-26", "(1-6)"
+  const match = name.match(/(\d+)\s*[-_–—toถึง]\s*(\d+)/i);
+  if (match) {
+    const s = parseInt(match[1], 10);
+    const e = parseInt(match[2], 10);
+    if (s > 0 && e >= s) {
+      return { startNo: s, endNo: e };
+    }
+  }
+  return null;
+}
+
 function sortReceiptPhotoBatch(photos) {
+  // Try sequence chain first if startNo & endNo exist
+  const hasRanges = photos.some(p => {
+    const r = parseRangeFromFilename(p.label || p.sortName);
+    return !!r || (p.startNo && p.endNo);
+  });
+
+  if (hasRanges) {
+    photos.forEach(p => {
+      if (!p.startNo || !p.endNo) {
+        const r = parseRangeFromFilename(p.label || p.sortName);
+        if (r) {
+          p.startNo = r.startNo;
+          p.endNo = r.endNo;
+        }
+      }
+    });
+    return chainReceiptPhotosBySequence(photos);
+  }
+
   return [...photos].sort((a, b) => {
     const nameCompare = receiptPhotoCollator.compare(a.sortName || a.label || '', b.sortName || b.label || '');
     if (nameCompare !== 0) return nameCompare;
@@ -66,34 +378,479 @@ function sortReceiptPhotoBatch(photos) {
   });
 }
 
+// ----------------------------------------------------
+// OCR IDENTITY EXTRACTION (Tesseract.js Client-Side)
+// Target: TR#, RCPT#, Sequence Numbers on Header
+// ----------------------------------------------------
+
+let tesseractWorkerPromise = null;
+
+async function getOcrWorker() {
+  if (tesseractWorkerPromise) return tesseractWorkerPromise;
+
+  tesseractWorkerPromise = (async () => {
+    if (typeof Tesseract === 'undefined') {
+      throw new Error('Tesseract.js library not loaded');
+    }
+    // Create lazy-loaded singleton worker for 'eng'
+    const worker = await Tesseract.createWorker('eng');
+    return worker;
+  })();
+
+  return tesseractWorkerPromise;
+}
+
+/**
+ * Preprocesses an image by cropping the Top Header (top ~25%)
+ * downscaling, converting to grayscale, and increasing contrast on canvas.
+ */
+function preprocessHeaderForOcr(imageSource) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const origW = img.naturalWidth || img.width;
+        const origH = img.naturalHeight || img.height;
+
+        // Crop top 25% of image where THP receipt header (TR#, RCPT#) is located
+        const cropH = Math.round(origH * 0.28);
+        const cropW = origW;
+
+        // Target max width ~1200px for optimal OCR speed & memory
+        const scale = Math.min(1, 1200 / cropW);
+        const targetW = Math.round(cropW * scale);
+        const targetH = Math.round(cropH * scale);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+
+        // Draw cropped region
+        ctx.drawImage(img, 0, 0, cropW, cropH, 0, 0, targetW, targetH);
+
+        // Grayscale & Contrast Enhancement
+        const imgData = ctx.getImageData(0, 0, targetW, targetH);
+        const d = imgData.data;
+        const contrast = 1.35; // boost contrast
+        const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
+
+        for (let i = 0; i < d.length; i += 4) {
+          // luminance formula
+          const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          const val = factor * (gray - 128) + 128;
+          const clamped = Math.max(0, Math.min(255, val));
+          d[i] = clamped;
+          d[i + 1] = clamped;
+          d[i + 2] = clamped;
+        }
+        ctx.putImageData(imgData, 0, 0);
+
+        resolve(canvas.toDataURL('image/jpeg', 0.85));
+      } catch (err) {
+        reject(err);
+      }
+    };
+    img.onerror = () => reject(new Error('โหลดภาพเพื่อทำ OCR ไม่สำเร็จ'));
+    img.src = typeof imageSource === 'string' ? imageSource : URL.createObjectURL(imageSource);
+  });
+}
+
+/**
+ * Extracts TR# and RCPT# from text using robust patterns
+ */
+function parseReceiptHeaderIdentity(text) {
+  if (!text || typeof text !== 'string') {
+    return { tr: null, rcpt: null, rawText: '' };
+  }
+
+  // Clean obvious noise
+  const clean = text.replace(/[\r\n]+/g, ' ');
+
+  // Look for TR# pattern: e.g. "TR# 11489115", "TR: 11489115", "TR 11489115", "TR#11489115"
+  let tr = null;
+  const trMatch = clean.match(/(?:TR\s*#?|TR\s*[:\-])\s*([0-9]{7,10})/i);
+  if (trMatch) {
+    tr = trMatch[1];
+  }
+
+  // Look for RCPT# pattern: e.g. "RCPT# 18101", "RCPT: 18101", "REC# 18101", "RCPT 18101"
+  let rcpt = null;
+  const rcptMatch = clean.match(/(?:RCPT\s*#?|REC(?:EIPT)?\s*#?|RCPT\s*[:\-])\s*([0-9]{4,8})/i);
+  if (rcptMatch) {
+    rcpt = rcptMatch[1];
+  }
+
+  return {
+    tr: tr || null,
+    rcpt: rcpt || null,
+    rawText: clean
+  };
+}
+
+/**
+ * Background non-blocking OCR worker execution on a photo object
+ */
+async function processPhotoHeaderIdentity(photo) {
+  if (!photo || photo.userConfirmed) return;
+
+  photo.ocrStatus = 'processing';
+  updatePhotoIdentityBadge();
+
+  try {
+    const preprocessedDataUrl = await preprocessHeaderForOcr(photo.file);
+    const worker = await getOcrWorker();
+    const { data } = await worker.recognize(preprocessedDataUrl);
+
+    const parsed = parseReceiptHeaderIdentity(data.text);
+    photo.detectedTR = parsed.tr;
+    photo.detectedRcpt = parsed.rcpt;
+    photo.ocrConfidence = data.confidence || 0;
+    photo.ocrRawText = parsed.rawText;
+    photo.ocrStatus = 'done';
+
+    // Validate TR with current TR
+    validatePhotoTRIdentity(photo);
+  } catch (err) {
+    console.warn('OCR Identity extraction notice:', err.message);
+    photo.detectedTR = null;
+    photo.detectedRcpt = null;
+    photo.trMatchStatus = 'not_found';
+    photo.ocrStatus = 'done';
+  } finally {
+    updatePhotoIdentityBadge();
+    triggerAutoSave();
+  }
+}
+
+/**
+ * Validates a photo's detected TR against the current working TR
+ */
+function validatePhotoTRIdentity(photo) {
+  const currentTR = document.getElementById('trNumberInput').value.trim();
+
+  if (!photo.detectedTR) {
+    photo.trMatchStatus = 'not_found';
+    return;
+  }
+
+  if (!currentTR) {
+    // Case A: No current TR in system -> prompt user to adopt this TR
+    photo.trMatchStatus = 'detected_new';
+    promptAdoptDetectedTR(photo.detectedTR, photo.detectedRcpt);
+  } else if (photo.detectedTR === currentTR) {
+    // Matches current TR
+    photo.trMatchStatus = 'matched';
+  } else {
+    // Case B: Mismatch -> warn user, DO NOT switch automatically
+    photo.trMatchStatus = 'mismatched';
+    promptTrMismatchWarning(photo, currentTR, photo.detectedTR);
+  }
+}
+
+/**
+ * Modal prompt for Case A: User has no TR set, detected TR in photo
+ */
+function promptAdoptDetectedTR(detectedTR, detectedRcpt) {
+  const modal = document.getElementById('trPromptModal');
+  const numSpan = document.getElementById('trPromptDetectedNum');
+  const rcptSpan = document.getElementById('trPromptRcptNum');
+  const btnConfirm = document.getElementById('btnTrPromptConfirm');
+  const btnDismiss = document.getElementById('btnTrPromptDismiss');
+
+  if (!modal || !numSpan || !btnConfirm) return;
+
+  numSpan.textContent = 'TR# ' + detectedTR;
+  rcptSpan.textContent = detectedRcpt ? `(RCPT# ${detectedRcpt})` : '';
+
+  modal.classList.remove('hidden');
+
+  btnConfirm.onclick = () => {
+    modal.classList.add('hidden');
+    document.getElementById('trNumberInput').value = detectedTR;
+    // Mark photos with this TR as matched
+    state.photos.forEach(p => {
+      if (p.detectedTR === detectedTR) p.trMatchStatus = 'matched';
+    });
+    updatePhotoIdentityBadge();
+    triggerAutoSave();
+    // Reuse existing Thailand Post API fetch workflow
+    fetchTrackingByTR(detectedTR);
+  };
+
+  btnDismiss.onclick = () => {
+    modal.classList.add('hidden');
+  };
+}
+
+/**
+ * Modal prompt for Case B: Mismatch between photo TR and current TR
+ */
+function promptTrMismatchWarning(photo, currentTR, detectedTR) {
+  const modal = document.getElementById('trMismatchModal');
+  const curSpan = document.getElementById('trMismatchCurrentVal');
+  const detSpan = document.getElementById('trMismatchDetectedVal');
+  const btnExclude = document.getElementById('btnTrMismatchExclude');
+  const btnKeep = document.getElementById('btnTrMismatchKeep');
+  const btnSwitch = document.getElementById('btnTrMismatchSwitch');
+
+  if (!modal || !curSpan || !detSpan) return;
+
+  curSpan.textContent = `TR ${state.defaultZipPrefix}|${currentTR}`;
+  detSpan.textContent = `TR ${detectedTR}`;
+
+  modal.classList.remove('hidden');
+
+  btnExclude.onclick = () => {
+    modal.classList.add('hidden');
+    // Remove this photo from state
+    const pIdx = state.photos.indexOf(photo);
+    if (pIdx >= 0) {
+      state.photos.splice(pIdx, 1);
+      alignReceiptItemsToPhotos();
+      renderPhotoTabs();
+      if (state.activePhotoIndex >= state.photos.length) {
+        state.activePhotoIndex = Math.max(0, state.photos.length - 1);
+      }
+      if (state.photos.length > 0) switchPhoto(state.activePhotoIndex, false);
+      else showEmptyPhotoState();
+      triggerAutoSave();
+    }
+  };
+
+  btnKeep.onclick = () => {
+    modal.classList.add('hidden');
+    photo.userConfirmed = true; // User acknowledged keeping this photo
+    updatePhotoIdentityBadge();
+    triggerAutoSave();
+  };
+
+  btnSwitch.onclick = () => {
+    modal.classList.add('hidden');
+    document.getElementById('trNumberInput').value = detectedTR;
+    photo.trMatchStatus = 'matched';
+    photo.userConfirmed = true;
+    updatePhotoIdentityBadge();
+    triggerAutoSave();
+    // Reuse existing Thailand Post API fetch workflow
+    fetchTrackingByTR(detectedTR);
+  };
+}
+
+/**
+ * Updates identity badge display on the left panel bottom bar
+ */
+function updatePhotoIdentityBadge() {
+  const badge = document.getElementById('photoIdentityBadge');
+  if (!badge) return;
+
+  const currentPhoto = state.photos[state.activePhotoIndex];
+  if (!currentPhoto) {
+    badge.className = 'hidden';
+    return;
+  }
+
+  if (currentPhoto.ocrStatus === 'processing') {
+    badge.className = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono text-[10px] bg-slate-700 text-amber-300 animate-pulse';
+    badge.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> กำลังตรวจใบเสร็จ...';
+    return;
+  }
+
+  const trText = currentPhoto.detectedTR ? `TR# ${currentPhoto.detectedTR}` : null;
+  const rcptText = currentPhoto.detectedRcpt ? `RCPT# ${currentPhoto.detectedRcpt}` : null;
+  const identityLabel = [trText, rcptText].filter(Boolean).join(' | ');
+
+  if (currentPhoto.trMatchStatus === 'matched') {
+    badge.className = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono text-[10px] bg-emerald-900/80 text-emerald-200 border border-emerald-700/60';
+    badge.innerHTML = `<i class="fa-solid fa-check"></i> ${escapeHtml(identityLabel || 'TR ตรงกัน')}`;
+  } else if (currentPhoto.trMatchStatus === 'mismatched') {
+    badge.className = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono text-[10px] bg-amber-900/80 text-amber-200 border border-amber-700/60';
+    badge.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(identityLabel || 'TR ไม่ตรงกัน')}`;
+  } else if (currentPhoto.detectedRcpt && !currentPhoto.detectedTR) {
+    badge.className = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono text-[10px] bg-blue-900/80 text-blue-200 border border-blue-700/60';
+    badge.innerHTML = `<i class="fa-solid fa-file-invoice"></i> ${escapeHtml(rcptText)}`;
+  } else if (currentPhoto.trMatchStatus === 'not_found' || !currentPhoto.detectedTR) {
+    badge.className = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono text-[10px] bg-slate-800 text-slate-400 border border-slate-700/60';
+    badge.innerHTML = '<i class="fa-regular fa-circle-question"></i> ไม่พบ TR ในภาพ';
+  } else {
+    badge.className = 'hidden';
+  }
+}
+
+// ----------------------------------------------------
+// RECEIPT SEQUENCE MATCHER (TR -> Receipt -> Page -> Sequence -> Track)
+// ----------------------------------------------------
+
+/**
+ * Builds sequence chains from photo ranges, respecting overlaps and sequence resets (new receipt within same TR).
+ * E.g. [16-26], [37-45], [7-16], [26-37], [1-7]
+ * Chained to: [1-7] -> [7-16] -> [16-26] -> [26-37] -> [37-45]
+ */
+function chainReceiptPhotosBySequence(photos) {
+  if (!Array.isArray(photos) || photos.length <= 1) return [...(photos || [])];
+
+  const withRanges = [];
+  const withoutRanges = [];
+
+  photos.forEach((photo, idx) => {
+    const s = Number(photo.startNo);
+    const e = Number(photo.endNo);
+    if (Number.isFinite(s) && Number.isFinite(e) && s > 0 && e >= s) {
+      withRanges.push({ photo, startNo: s, endNo: e, originalIndex: idx });
+    } else {
+      withoutRanges.push(photo);
+    }
+  });
+
+  if (withRanges.length === 0) return [...photos];
+
+  // Build receipt blocks by grouping contiguous / overlapping chains
+  withRanges.sort((a, b) => a.startNo - b.startNo || a.originalIndex - b.originalIndex);
+  const pool = [...withRanges];
+  const receiptBlocks = [];
+
+  while (pool.length > 0) {
+    // 1. Find the best root (prefer startNo === 1 with lowest originalIndex or lowest startNo)
+    let rootIdx = 0;
+    for (let i = 0; i < pool.length; i++) {
+      if (pool[i].startNo === 1) {
+        rootIdx = i;
+        break;
+      }
+    }
+
+    const currentBlock = [pool.splice(rootIdx, 1)[0]];
+
+    // 2. Grow this receipt block by chaining contiguous / overlapping pages
+    let added = true;
+    while (added) {
+      added = false;
+      const last = currentBlock[currentBlock.length - 1];
+
+      let bestCandIdx = -1;
+      let bestScore = -Infinity;
+
+      for (let i = 0; i < pool.length; i++) {
+        const cand = pool[i];
+        // If candidate starts with 1 and last is not at 1, it's a new receipt!
+        if (cand.startNo === 1) continue;
+
+        let score = 0;
+        if (cand.startNo <= last.endNo && cand.endNo > last.endNo) {
+          // Overlap!
+          const overlap = last.endNo - cand.startNo + 1;
+          score = 1000 - overlap;
+        } else if (cand.startNo === last.endNo + 1) {
+          // Exactly contiguous
+          score = 900;
+        } else if (cand.startNo > last.endNo && cand.startNo <= last.endNo + 5) {
+          // Small forward gap
+          score = 500 - (cand.startNo - last.endNo);
+        }
+
+        if (score > 0 && score > bestScore) {
+          bestScore = score;
+          bestCandIdx = i;
+        }
+      }
+
+      if (bestCandIdx >= 0) {
+        currentBlock.push(pool.splice(bestCandIdx, 1)[0]);
+        added = true;
+      }
+    }
+
+    receiptBlocks.push(currentBlock);
+  }
+
+  const orderedResult = [];
+  receiptBlocks.forEach(block => {
+    orderedResult.push(...block.map(b => b.photo));
+  });
+
+  // Append any photos that don't have specified ranges
+  orderedResult.push(...withoutRanges);
+  return orderedResult;
+}
+
 function alignReceiptItemsToPhotos() {
+  // Sort receipt items strictly by their sequence no
   state.receiptItems = state.receiptItems
     .map((item, originalIndex) => ({ item, originalIndex }))
     .sort((a, b) => (Number(a.item.no) || a.originalIndex + 1) - (Number(b.item.no) || b.originalIndex + 1))
     .map(entry => entry.item);
 
-  state.photos.forEach(photo => {
-    delete photo.startNo;
-    delete photo.endNo;
-  });
-
-  const totalItems = state.receiptItems.length;
   const totalPhotos = state.photos.length;
+  if (totalPhotos === 0) return;
 
-  state.receiptItems.forEach((item, index) => {
-    item.no = index + 1;
-    item.photoIndex = totalPhotos > 0
-      ? Math.min(totalPhotos - 1, Math.floor(index * totalPhotos / totalItems))
-      : 0;
+  // Check if any photo has defined sequence ranges (manual override or parsed)
+  const hasConfiguredRanges = state.photos.some(p => Number.isFinite(p.startNo) && Number.isFinite(p.endNo));
 
-    const photo = state.photos[item.photoIndex];
-    if (photo) {
-      if (!photo.startNo) photo.startNo = item.no;
-      photo.endNo = item.no;
-    }
-  });
+  if (hasConfiguredRanges) {
+    // Map items to photo by matching item.no into [photo.startNo, photo.endNo]
+    state.receiptItems.forEach(item => {
+      const itemSeq = Number(item.no);
+      let matchedIndex = -1;
+      let alternateIndex = -1;
 
-  if (state.receiptItems.length > 0) {
+      for (let pIdx = 0; pIdx < state.photos.length; pIdx++) {
+        const photo = state.photos[pIdx];
+        if (Number.isFinite(photo.startNo) && Number.isFinite(photo.endNo)) {
+          if (itemSeq >= photo.startNo && itemSeq <= photo.endNo) {
+            if (matchedIndex === -1) {
+              matchedIndex = pIdx;
+            } else {
+              alternateIndex = pIdx; // Overlap on multiple photos!
+            }
+          }
+        }
+      }
+
+      if (matchedIndex !== -1) {
+        item.photoIndex = matchedIndex;
+        if (alternateIndex !== -1) {
+          item.alternatePhotoIndex = alternateIndex;
+        } else {
+          delete item.alternatePhotoIndex;
+        }
+      } else {
+        // Outside known ranges: find closest photo boundary
+        let closestIdx = 0;
+        let minDiff = Infinity;
+        state.photos.forEach((photo, pIdx) => {
+          if (Number.isFinite(photo.startNo) && Number.isFinite(photo.endNo)) {
+            const diff = Math.min(Math.abs(itemSeq - photo.startNo), Math.abs(itemSeq - photo.endNo));
+            if (diff < minDiff) {
+              minDiff = diff;
+              closestIdx = pIdx;
+            }
+          }
+        });
+        item.photoIndex = closestIdx;
+      }
+    });
+  } else {
+    // If photos do NOT have ranges defined yet, distribute proportionally
+    const totalItems = state.receiptItems.length;
+    state.receiptItems.forEach((item, index) => {
+      item.photoIndex = totalPhotos > 0
+        ? Math.min(totalPhotos - 1, Math.floor(index * totalPhotos / Math.max(1, totalItems)))
+        : 0;
+    });
+
+    // Auto assign startNo and endNo to photos from items
+    state.photos.forEach(p => { delete p.startNo; delete p.endNo; });
+    state.receiptItems.forEach(item => {
+      const photo = state.photos[item.photoIndex];
+      if (photo) {
+        if (!photo.startNo || item.no < photo.startNo) photo.startNo = item.no;
+        if (!photo.endNo || item.no > photo.endNo) photo.endNo = item.no;
+      }
+    });
+  }
+
+  if (state.receiptItems.length > 0 && !state.activeItemNo) {
     state.activeItemNo = state.receiptItems[0].no;
   }
 }
@@ -232,6 +989,58 @@ function getSessionStats(receiptItems, excelEntries) {
   return { total: (receiptItems || []).length, matched, delivered };
 }
 
+let autoSaveTimer = null;
+const AUTOSAVE_DELAY_MS = 800;
+
+function updateAutoSaveIndicator(status) {
+  const indicator = document.getElementById('autoSaveIndicator');
+  const icon = document.getElementById('autoSaveIcon');
+  const text = document.getElementById('autoSaveText');
+  if (!indicator || !icon || !text) return;
+
+  if (status === 'saving') {
+    indicator.classList.remove('hidden');
+    icon.className = 'w-2 h-2 rounded-full bg-amber-500 animate-pulse';
+    text.textContent = 'กำลังบันทึก...';
+    text.className = 'text-amber-700 font-medium';
+  } else if (status === 'saved') {
+    indicator.classList.remove('hidden');
+    icon.className = 'w-2 h-2 rounded-full bg-emerald-500';
+    text.textContent = 'บันทึกอัตโนมัติแล้ว ✓';
+    text.className = 'text-emerald-700 font-medium';
+  } else if (status === 'error') {
+    indicator.classList.remove('hidden');
+    icon.className = 'w-2 h-2 rounded-full bg-rose-500';
+    text.textContent = 'บันทึกไม่สำเร็จ';
+    text.className = 'text-rose-700 font-medium';
+  } else if (status === 'idle') {
+    // Keep visible if there is saved work
+    if (hasCurrentWork()) {
+      indicator.classList.remove('hidden');
+      icon.className = 'w-2 h-2 rounded-full bg-slate-400';
+      text.textContent = 'บันทึกแล้ว';
+      text.className = 'text-slate-500';
+    } else {
+      indicator.classList.add('hidden');
+    }
+  }
+}
+
+function triggerAutoSave() {
+  if (!hasCurrentWork()) return;
+  updateAutoSaveIndicator('saving');
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(async () => {
+    try {
+      await saveCurrentSession({ silent: true });
+      updateAutoSaveIndicator('saved');
+    } catch (err) {
+      console.error('AutoSave error:', err);
+      updateAutoSaveIndicator('error');
+    }
+  }, AUTOSAVE_DELAY_MS);
+}
+
 async function saveCurrentSession({ silent = false } = {}) {
   if (!hasCurrentWork()) {
     if (!silent) alert('ยังไม่มีข้อมูลงานสำหรับบันทึก');
@@ -264,6 +1073,7 @@ async function saveCurrentSession({ silent = false } = {}) {
 
   await putHistory(record);
   state.currentSessionId = id;
+  localStorage.setItem('thp_latest_session_id', id);
   if (!silent) alert('บันทึกงานลงประวัติในเครื่องเรียบร้อยแล้ว');
   return true;
 }
@@ -282,6 +1092,7 @@ async function restoreHistory(id) {
 
   revokeUserPhotoUrls();
   state.currentSessionId = record.id;
+  localStorage.setItem('thp_latest_session_id', record.id);
   state.receiptItems = JSON.parse(JSON.stringify(record.receiptItems || []));
   state.excelMap = new Map(record.excelEntries || []);
   state.photos = hydratePhotos(record.photos || []);
@@ -304,8 +1115,13 @@ async function restoreHistory(id) {
   renderPhotoTabs();
   renderItems();
   updateStats();
-  if (state.photos.length > 0) switchPhoto(0, false);
-  else showEmptyPhotoState();
+  if (state.photos.length > 0) {
+    state.photos.forEach(p => validatePhotoTRIdentity(p));
+    switchPhoto(0, false);
+  } else {
+    showEmptyPhotoState();
+  }
+  updatePhotoIdentityBadge();
   document.getElementById('historyModal').classList.add('hidden');
 }
 
@@ -489,6 +1305,179 @@ function setupHistory() {
   };
 }
 
+// ----------------------------------------------------
+// PAGE SEQUENCE & ORDER MANAGER UI
+// ----------------------------------------------------
+function setupPageManager() {
+  const modal = document.getElementById('pageManageModal');
+  const btnManage = document.getElementById('btnManagePages');
+  const btnClose = document.getElementById('btnClosePageManage');
+  const btnCancel = document.getElementById('btnCancelPageManage');
+  const btnSave = document.getElementById('btnSavePageManage');
+  const btnAutoChain = document.getElementById('btnAutoChainPages');
+
+  if (!btnManage || !modal) return;
+
+  btnManage.onclick = () => {
+    if (state.photos.length === 0) {
+      alert('ยังไม่มีรูปภาพใบเสร็จให้จัดการ กรุณาอัปโหลดรูปภาพก่อน');
+      return;
+    }
+    renderPageManageList();
+    modal.classList.remove('hidden');
+  };
+
+  const closeModal = () => modal.classList.add('hidden');
+  btnClose.onclick = closeModal;
+  btnCancel.onclick = closeModal;
+
+  btnAutoChain.onclick = () => {
+    // Read current inputs from the modal into temp photos
+    const inputs = document.querySelectorAll('#pageManageList [data-page-index]');
+    inputs.forEach(row => {
+      const idx = parseInt(row.getAttribute('data-page-index'));
+      const startVal = parseInt(row.querySelector('.input-page-start').value);
+      const endVal = parseInt(row.querySelector('.input-page-end').value);
+      if (state.photos[idx]) {
+        state.photos[idx].startNo = Number.isFinite(startVal) ? startVal : undefined;
+        state.photos[idx].endNo = Number.isFinite(endVal) ? endVal : undefined;
+      }
+    });
+
+    state.photos = chainReceiptPhotosBySequence(state.photos);
+    renderPageManageList();
+  };
+
+  btnSave.onclick = () => {
+    const rows = document.querySelectorAll('#pageManageList [data-page-index]');
+    rows.forEach(row => {
+      const idx = parseInt(row.getAttribute('data-page-index'));
+      const startVal = parseInt(row.querySelector('.input-page-start').value);
+      const endVal = parseInt(row.querySelector('.input-page-end').value);
+      const trVal = row.querySelector('.input-page-tr')?.value.trim();
+      const rcptVal = row.querySelector('.input-page-rcpt')?.value.trim();
+
+      if (state.photos[idx]) {
+        state.photos[idx].startNo = Number.isFinite(startVal) && startVal > 0 ? startVal : undefined;
+        state.photos[idx].endNo = Number.isFinite(endVal) && endVal > 0 ? endVal : undefined;
+        if (trVal) {
+          state.photos[idx].detectedTR = trVal;
+          state.photos[idx].userConfirmed = true;
+          validatePhotoTRIdentity(state.photos[idx]);
+        }
+        if (rcptVal) {
+          state.photos[idx].detectedRcpt = rcptVal;
+          state.photos[idx].userConfirmed = true;
+        }
+      }
+    });
+
+    alignReceiptItemsToPhotos();
+    updatePhotoIdentityBadge();
+    renderPhotoTabs();
+    renderItems();
+    triggerAutoSave();
+    closeModal();
+    alert('บันทึกการจัดลำดับหน้าและช่วงเลขเรียบร้อยแล้ว');
+  };
+}
+
+function renderPageManageList() {
+  const container = document.getElementById('pageManageList');
+  if (!container) return;
+
+  container.innerHTML = state.photos.map((photo, idx) => {
+    const start = photo.startNo ?? '';
+    const end = photo.endNo ?? '';
+    const title = photo.label || `หน้า ${idx + 1}`;
+    
+    // Check if overlap with previous photo
+    let overlapBadge = '';
+    if (idx > 0 && photo.startNo && state.photos[idx - 1]?.endNo) {
+      const prevEnd = state.photos[idx - 1].endNo;
+      if (photo.startNo <= prevEnd) {
+        overlapBadge = `<span class="text-[10px] text-amber-700 bg-amber-100 px-1.5 py-0.5 rounded font-medium ml-1">Overlap ที่เลข ${photo.startNo}-${prevEnd}</span>`;
+      } else if (photo.startNo === 1) {
+        overlapBadge = `<span class="text-[10px] text-blue-700 bg-blue-100 px-1.5 py-0.5 rounded font-medium ml-1">เริ่มใบเสร็จใบใหม่ (Sequence 1)</span>`;
+      } else if (photo.startNo > prevEnd + 1) {
+        overlapBadge = `<span class="text-[10px] text-rose-700 bg-rose-100 px-1.5 py-0.5 rounded font-medium ml-1">มี Gap ข้ามเลข ${prevEnd + 1}–${photo.startNo - 1}</span>`;
+      }
+    }
+
+    return `
+      <div class="flex items-center justify-between gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl" data-page-index="${idx}">
+        <div class="flex items-center gap-2 min-w-0">
+          <span class="w-6 h-6 rounded-md bg-slate-700 text-white font-mono text-xs flex items-center justify-center shrink-0">
+            ${idx + 1}
+          </span>
+          <div class="min-w-0">
+            <div class="text-xs font-semibold text-slate-800 truncate flex items-center">
+              ${escapeHtml(title)}
+              ${overlapBadge}
+            </div>
+            <div class="flex items-center gap-2 mt-1 text-[11px] text-slate-600">
+              <label class="flex items-center gap-1 font-mono">
+                <span class="text-slate-400">TR#:</span>
+                <input type="text" placeholder="ไม่ระบุ" value="${photo.detectedTR || ''}"
+                       class="input-page-tr w-20 px-1.5 py-0.5 text-[11px] border border-slate-300 rounded font-mono bg-white">
+              </label>
+              <label class="flex items-center gap-1 font-mono">
+                <span class="text-slate-400">RCPT#:</span>
+                <input type="text" placeholder="ไม่ระบุ" value="${photo.detectedRcpt || ''}"
+                       class="input-page-rcpt w-16 px-1.5 py-0.5 text-[11px] border border-slate-300 rounded font-mono bg-white">
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-1.5 shrink-0">
+          <input type="number" min="1" placeholder="เริ่ม" value="${start}"
+                 class="input-page-start w-16 px-2 py-1 text-xs border border-slate-300 rounded font-mono text-center">
+          <span class="text-slate-400 text-xs">–</span>
+          <input type="number" min="1" placeholder="สิ้นสุด" value="${end}"
+                 class="input-page-end w-16 px-2 py-1 text-xs border border-slate-300 rounded font-mono text-center">
+          
+          <div class="flex flex-col gap-0.5 ml-1">
+            <button type="button" class="btn-move-page-up p-1 text-[10px] bg-white border border-slate-300 hover:bg-slate-100 rounded text-slate-600 ${idx === 0 ? 'opacity-30 pointer-events-none' : ''}" title="เลื่อนขึ้น">
+              <i class="fa-solid fa-chevron-up"></i>
+            </button>
+            <button type="button" class="btn-move-page-down p-1 text-[10px] bg-white border border-slate-300 hover:bg-slate-100 rounded text-slate-600 ${idx === state.photos.length - 1 ? 'opacity-30 pointer-events-none' : ''}" title="เลื่อนลง">
+              <i class="fa-solid fa-chevron-down"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Attach move up / move down handlers
+  container.querySelectorAll('.btn-move-page-up').forEach(btn => {
+    btn.onclick = (e) => {
+      const row = e.target.closest('[data-page-index]');
+      const idx = parseInt(row.getAttribute('data-page-index'));
+      if (idx > 0) {
+        const temp = state.photos[idx];
+        state.photos[idx] = state.photos[idx - 1];
+        state.photos[idx - 1] = temp;
+        renderPageManageList();
+      }
+    };
+  });
+
+  container.querySelectorAll('.btn-move-page-down').forEach(btn => {
+    btn.onclick = (e) => {
+      const row = e.target.closest('[data-page-index]');
+      const idx = parseInt(row.getAttribute('data-page-index'));
+      if (idx < state.photos.length - 1) {
+        const temp = state.photos[idx];
+        state.photos[idx] = state.photos[idx + 1];
+        state.photos[idx + 1] = temp;
+        renderPageManageList();
+      }
+    };
+  });
+}
+
 function showEmptyPhotoState() {
   const img = document.getElementById('receiptImage');
   const hint = document.getElementById('activeItemHint');
@@ -522,6 +1511,8 @@ function startNewSession() {
   state.currentSessionId = null;
 
   localStorage.removeItem('thp_latest_cropped_receipt');
+  localStorage.removeItem('thp_latest_session_id');
+  updateAutoSaveIndicator('idle');
 
   document.getElementById('trNumberInput').value = '';
   document.getElementById('searchInput').value = '';
@@ -640,6 +1631,7 @@ function switchPhoto(index, scrollRightList = false) {
   img.classList.remove('hidden');
   img.src = state.photos[index].file;
   renderPhotoTabs();
+  updatePhotoIdentityBadge();
 
   if (scrollRightList && state.isSyncEnabled) {
     const photoMeta = state.photos[index];
@@ -1018,7 +2010,11 @@ function applyPerspectiveCrop() {
   }
 
   renderPhotoTabs();
+  triggerAutoSave();
   alert('บันทึกรูปภาพใบเสร็จตามกรอบที่ปรับเรียบร้อยแล้ว!');
+
+  // Background non-blocking OCR header extraction on cropped image
+  processPhotoHeaderIdentity(newPhotoObj);
 }
 
 // API Modal Settings
@@ -1159,9 +2155,7 @@ function buildReceiptCode(zipPrefix, trNumber) {
   return {
     zip,
     trDigits,
-    fullCode: trDigits.startsWith(zip) && trDigits.length > zip.length
-      ? trDigits
-      : zip + trDigits
+    fullCode: zip + '|' + trDigits
   };
 }
 
@@ -1218,6 +2212,32 @@ async function fetchTrackingByTR(trNumber) {
     }
 
     const json = await response.json();
+
+    // [DEBUG] — Structural inspection only, no PII dump, in-memory only
+    try { inspectRawApiResponse(json, response.status); } catch (_e) { /* inspector must not break fetch */ }
+
+    // 1. Check application-level error before parsing items
+    if (json?.status === false) {
+      const msg = String(json?.message || 'คำขอถูกปฏิเสธโดยระบบ ปณท');
+      const isQuota = /quota|over\s*quota/i.test(msg);
+
+      if (isQuota) {
+        const openDash = confirm(
+          '⚠️ API ปณท เกินโควตาการเรียกใช้งาน\n\n' +
+          'ระบบ ปณท ปฏิเสธคำขอชั่วคราว: ' + msg + '\n\n' +
+          'ต้องการเปิดหน้า Dashboard ปณท หรือไม่?'
+        );
+        if (openDash) window.open('https://track.thailandpost.co.th/dashboard', '_blank');
+      } else {
+        const openDash = confirm(
+          'API ปณท ปฏิเสธคำขอ: ' + msg + '\n\n' +
+          'ต้องการเปิดหน้า Dashboard เพื่อตรวจสอบหรือไม่?'
+        );
+        if (openDash) window.open('https://track.thailandpost.co.th/dashboard', '_blank');
+      }
+      return;
+    }
+
     const items = extractReceiptApiItems(json);
     if (Array.isArray(items) && items.length > 0) {
       processApiItems(items);
@@ -1225,9 +2245,9 @@ async function fetchTrackingByTR(trNumber) {
       return;
     }
 
+
     const openWeb = confirm(
-      'API ตอบกลับสำเร็จ แต่ไม่พบรายการสำหรับเลข TR นี้\n\nรหัส: ' + fullTRCode +
-      '\n(ระบบส่งรหัสไปรษณีย์ต่อกับเลข TR โดยไม่มีเครื่องหมายคั่น)' +
+      'API ตอบกลับสำเร็จ แต่ไม่พบรายการสำหรับเลข TR นี้\n\nรหัสที่ส่ง: ' + fullTRCode +
       '\nต้องการเปิดหน้า Dashboard เพื่อตรวจสอบหรือไม่?'
     );
     if (openWeb) window.open('https://track.thailandpost.co.th/dashboard', '_blank');
@@ -1294,6 +2314,7 @@ function processApiItems(items) {
 
   renderItems();
   updateStats();
+  triggerAutoSave();
 }
 
 function setupEventListeners() {
@@ -1313,6 +2334,10 @@ function setupEventListeners() {
     if (e.key === 'Enter') {
       btnFetchTR.click();
     }
+  });
+
+  trInput.addEventListener('input', () => {
+    triggerAutoSave();
   });
 
   // Search
@@ -1356,7 +2381,13 @@ function setupEventListeners() {
     state.activePhotoIndex = firstNewIndex;
     switchPhoto(state.activePhotoIndex, false);
     e.target.value = '';
+    triggerAutoSave();
     alert('เพิ่มรูปใบเสร็จ ' + newPhotos.length + ' ไฟล์ เรียงลำดับหน้า 1–' + state.photos.length + ' แล้ว');
+
+    // Background non-blocking OCR header extraction for each new photo
+    newPhotos.forEach(photo => {
+      processPhotoHeaderIdentity(photo);
+    });
   });
 
   // Track Detail Modal
@@ -1463,6 +2494,7 @@ function processExcelRows(rows) {
 
   renderItems();
   updateStats();
+  triggerAutoSave();
 }
 
 function renderItems() {
@@ -1571,6 +2603,16 @@ function renderItems() {
         </div>
 
         <div class="flex items-center gap-1.5 shrink-0">
+          <div class="flex items-center gap-1">
+            <span class="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200" title="หน้าหลัก">
+              หน้า ${(item.photoIndex ?? 0) + 1}
+            </span>
+            ${typeof item.alternatePhotoIndex === 'number' ? `
+              <button type="button" class="btn-switch-alt-page text-[10px] font-mono px-1 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-300 hover:bg-amber-100 transition" title="พบในหน้ารอยต่อด้วย (Overlap) คลิกเพื่อสลับดูหน้านี้">
+                +หน้า ${item.alternatePhotoIndex + 1}
+              </button>
+            ` : ''}
+          </div>
           <button type="button" class="btn-track-action px-2 md:px-2.5 py-0.5 md:py-1 text-[11px] md:text-xs font-medium rounded-lg bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 transition">
             <i class="fa-solid fa-timeline"></i> Track
           </button>
@@ -1610,6 +2652,17 @@ function renderItems() {
       trackBtn.onclick = (e) => {
         e.stopPropagation();
         showTrackTimeline(cleanTrack);
+      };
+    }
+
+    const altPageBtn = card.querySelector('.btn-switch-alt-page');
+    if (altPageBtn) {
+      altPageBtn.onclick = (e) => {
+        e.stopPropagation();
+        if (typeof item.alternatePhotoIndex === 'number') {
+          switchPhoto(item.alternatePhotoIndex, false);
+          highlightItemNo(item.no);
+        }
       };
     }
 

@@ -7,6 +7,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <script>
     tailwind.config = {
@@ -156,6 +157,18 @@
       <button id="btnResetData" title="เริ่มงานใหม่" class="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all shrink-0">
         <i class="fa-solid fa-arrow-rotate-left text-xs"></i>
       </button>
+
+      <!-- [DEBUG] API Structure Inspector — TEMPORARY, remove after analysis -->
+      <button id="btnApiInspector" title="[DEBUG] ตรวจโครงสร้าง API Response — ใช้หลังดึง TR แล้ว" class="p-1.5 px-2 bg-amber-100 hover:bg-amber-200 border border-amber-400 rounded-lg text-amber-800 text-[11px] font-bold flex items-center gap-1 transition shrink-0">
+        <i class="fa-solid fa-flask text-amber-600"></i>
+        <span class="hidden sm:inline">API Inspector</span>
+      </button>
+
+      <!-- Autosave Status Indicator -->
+      <div id="autoSaveIndicator" class="hidden items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium bg-slate-100 text-slate-500 shrink-0 transition-opacity duration-300">
+        <span id="autoSaveIcon" class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>
+        <span id="autoSaveText">บันทึกแล้ว</span>
+      </div>
     </div>
   </header>
 
@@ -172,6 +185,9 @@
             <i class="fa-regular fa-image text-rose-400"></i> <span class="hidden sm:inline">ใบเสร็จ</span>
           </span>
           <div id="photoTabsContainer" class="flex items-center gap-1"></div>
+          <button id="btnManagePages" class="p-1 px-1.5 bg-slate-700 hover:bg-slate-600 rounded text-slate-200 transition text-[11px] shrink-0" title="จัดการลำดับหน้าและช่วงเลข">
+            <i class="fa-solid fa-layer-group text-amber-400"></i> <span class="hidden sm:inline">จัดหน้า</span>
+          </button>
         </div>
 
         <div class="flex items-center gap-1 shrink-0">
@@ -198,10 +214,13 @@
         </div>
       </div>
 
-      <!-- Left Panel Bottom Quick Guide -->
-      <div class="bg-slate-800/80 px-2.5 py-1 text-[10px] text-slate-400 flex items-center justify-between border-t border-slate-700/60 z-10 shrink-0">
-        <span class="truncate"><i class="fa-regular fa-lightbulb text-amber-400"></i> แพนหรือซูมเพื่อดูตัวเลข</span>
-        <span id="activeItemHint" class="text-red-300 font-mono shrink-0 ml-1">ยังไม่มีรูป</span>
+      <!-- Left Panel Bottom Quick Guide & TR Identity Badge -->
+      <div class="bg-slate-800/90 px-2.5 py-1 text-[10px] text-slate-300 flex items-center justify-between border-t border-slate-700/60 z-10 shrink-0 gap-2">
+        <div class="flex items-center gap-1.5 min-w-0 truncate">
+          <span id="photoIdentityBadge" class="hidden px-1.5 py-0.5 rounded font-mono font-semibold text-[10px] shrink-0"></span>
+          <span id="activeItemHint" class="text-slate-400 truncate">ยังไม่มีรูป</span>
+        </div>
+        <span class="text-slate-400 shrink-0 hidden sm:inline"><i class="fa-regular fa-lightbulb text-amber-400"></i> แพนหรือซูมเพื่อดูตัวเลข</span>
       </div>
     </section>
 
@@ -380,6 +399,93 @@
     </div>
   </div>
 
+  <!-- MODAL: PAGE SEQUENCE MANAGER -->
+  <div id="pageManageModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 z-50 hidden">
+    <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+      <div class="bg-gradient-to-r from-slate-800 to-slate-900 text-white px-4 py-3 flex items-center justify-between shrink-0">
+        <div class="flex items-center gap-2">
+          <i class="fa-solid fa-layer-group text-amber-400"></i>
+          <div>
+            <h3 class="font-bold text-sm">จัดการลำดับหน้าและช่วงเลขใบเสร็จ</h3>
+            <p class="text-[10px] text-white/70">กำหนดช่วงเลข (Sequence Range) เพื่อเรียงหน้าใบเสร็จและจับคู่ Track ให้ถูกต้อง</p>
+          </div>
+        </div>
+        <button id="btnClosePageManage" class="text-white/80 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+
+      <div class="p-3 bg-amber-50 border-b border-amber-200/60 text-amber-900 text-xs flex items-start gap-2">
+        <i class="fa-solid fa-circle-info text-amber-600 mt-0.5 shrink-0"></i>
+        <div class="leading-relaxed text-[11px]">
+          กำหนดช่วงลำดับเลขที่ปรากฏในแต่ละรูป เช่น <code class="font-mono bg-amber-100 px-1 rounded">1-6</code>, <code class="font-mono bg-amber-100 px-1 rounded">7-16</code>, <code class="font-mono bg-amber-100 px-1 rounded">16-26</code> (รอยต่อเลขซ้ำแสดงว่าเป็นหน้าต่อกัน) หากลำดับกลับมาเริ่มที่ 1 ระบบจะจัดเป็นใบเสร็จถัดไปใน TR เดียวกัน
+        </div>
+      </div>
+
+      <div id="pageManageList" class="p-3 overflow-y-auto space-y-2 flex-1"></div>
+
+      <div class="bg-slate-50 px-4 py-2.5 border-t border-slate-200 flex items-center justify-between shrink-0">
+        <button id="btnAutoChainPages" class="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg text-xs font-semibold">
+          <i class="fa-solid fa-wand-magic-sparkles text-amber-600"></i> จัดเรียงโซ่อัตโนมัติ
+        </button>
+        <div class="flex items-center gap-2">
+          <button id="btnCancelPageManage" class="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg">ยกเลิก</button>
+          <button id="btnSavePageManage" class="px-4 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-xs">บันทึกการจัดหน้า</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: TR DETECTED PROMPT (Case A: When no current TR) -->
+  <div id="trPromptModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 z-50 hidden">
+    <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-150">
+      <div class="bg-gradient-to-r from-red-600 to-rose-600 text-white px-4 py-3 flex items-center gap-2">
+        <i class="fa-solid fa-receipt text-lg"></i>
+        <div>
+          <h3 class="font-bold text-sm">ตรวจพบเลข TR จากใบเสร็จ</h3>
+          <p class="text-[10px] text-white/80">ระบบอ่านข้อมูล Header อัตโนมัติ</p>
+        </div>
+      </div>
+      <div class="p-4 space-y-3">
+        <p class="text-xs text-slate-600 leading-relaxed">
+          ตรวจพบเลข <strong id="trPromptDetectedNum" class="text-red-600 font-mono text-sm">TR# -</strong> จากภาพใบเสร็จ <span id="trPromptRcptNum" class="font-mono text-slate-500"></span><br>
+          ต้องการใช้เลข TR นี้และดึงรายการพัสดุจากระบบ ปณท ทันทีหรือไม่?
+        </p>
+      </div>
+      <div class="bg-slate-50 px-4 py-2.5 border-t border-slate-200 flex items-center justify-end gap-2">
+        <button id="btnTrPromptDismiss" class="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-200 rounded-lg">ไม่ใช้</button>
+        <button id="btnTrPromptConfirm" class="px-4 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5">
+          <i class="fa-solid fa-cloud-arrow-down"></i> ใช้ TR นี้และดึงข้อมูล
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: TR MISMATCH WARNING (Case B: When current TR differs from detected TR) -->
+  <div id="trMismatchModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 z-50 hidden">
+    <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-150">
+      <div class="bg-gradient-to-r from-amber-600 to-orange-600 text-white px-4 py-3 flex items-center gap-2">
+        <i class="fa-solid fa-triangle-exclamation text-lg"></i>
+        <div>
+          <h3 class="font-bold text-sm">แจ้งเตือน: เลข TR ในภาพไม่ตรงกับงานปัจจุบัน</h3>
+          <p class="text-[10px] text-white/80">ตรวจพบต่างกลุ่มงาน</p>
+        </div>
+      </div>
+      <div class="p-4 space-y-3">
+        <div class="bg-amber-50 p-3 rounded-xl border border-amber-200/80 text-xs text-amber-900 space-y-1">
+          <div>งานปัจจุบัน: <strong id="trMismatchCurrentVal" class="font-mono text-slate-800">-</strong></div>
+          <div>ในภาพใบเสร็จ: <strong id="trMismatchDetectedVal" class="font-mono text-red-600 text-sm">-</strong></div>
+        </div>
+        <p class="text-xs text-slate-600 leading-relaxed">
+          ใบเสร็จนี้อาจเป็นคนละกลุ่มงาน กรุณาเลือกวิธีดำเนินการ:
+        </p>
+      </div>
+      <div class="bg-slate-50 px-4 py-2.5 border-t border-slate-200 flex flex-wrap items-center justify-end gap-2">
+        <button id="btnTrMismatchExclude" class="px-3 py-1.5 text-xs text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg font-medium">ไม่นำรูปนี้เข้า</button>
+        <button id="btnTrMismatchKeep" class="px-3 py-1.5 text-xs text-slate-700 bg-slate-200 hover:bg-slate-300 rounded-lg font-medium">นำเข้าไว้ก่อน</button>
+        <button id="btnTrMismatchSwitch" class="px-3.5 py-1.5 text-xs bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-semibold shadow-xs">เปลี่ยนไปใช้ TR ที่ตรวจพบ</button>
+      </div>
+    </div>
+  </div>
+
   <!-- MODAL: LOCAL WORK HISTORY -->
   <div id="historyModal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 z-50 hidden">
     <div class="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-3xl overflow-hidden flex flex-col max-h-[90vh]">
@@ -435,6 +541,28 @@
           <i class="fa-solid fa-external-link-alt"></i> ดูบนเว็บ ปณท
         </a>
         <button id="btnCloseTrackModalBtn" class="px-3 py-1 text-xs bg-slate-200 text-slate-700 rounded-lg">ปิด</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- [DEBUG] API Structure Inspector Modal — TEMPORARY, remove after analysis -->
+  <div id="apiInspectorModal" class="hidden fixed inset-0 bg-black/60 z-[200] flex items-start justify-center pt-10 px-4 overflow-y-auto">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-auto mb-10">
+      <div class="bg-amber-50 border-b border-amber-200 px-5 py-3 flex items-center justify-between rounded-t-2xl">
+        <div>
+          <div class="flex items-center gap-2">
+            <i class="fa-solid fa-flask text-amber-600"></i>
+            <span class="font-bold text-amber-900 text-sm">[DEBUG] API Structure Inspector</span>
+            <span class="text-[10px] bg-amber-200 text-amber-800 px-1.5 py-0.5 rounded font-bold">TEMPORARY</span>
+          </div>
+          <p class="text-xs text-amber-700 mt-0.5">เฉพาะวิเคราะห์โครงสร้าง API — ไม่แสดงข้อมูลส่วนตัว — ไม่บันทึกลง IndexedDB</p>
+        </div>
+        <button id="btnCloseApiInspector" class="text-amber-700 hover:text-amber-900 p-1 rounded-lg transition">
+          <i class="fa-solid fa-xmark text-lg"></i>
+        </button>
+      </div>
+      <div id="apiInspectorBody" class="p-5 font-mono text-xs text-slate-800 overflow-x-auto whitespace-pre-wrap leading-relaxed max-h-[70vh] overflow-y-auto bg-slate-950 text-slate-100 rounded-b-2xl">
+        <span class="text-slate-400">รอข้อมูล — กดปุ่ม "ดึง TR" ก่อน แล้วปิด/เปิด Inspector นี้อีกครั้ง</span>
       </div>
     </div>
   </div>
