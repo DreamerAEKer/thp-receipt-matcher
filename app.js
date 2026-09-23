@@ -315,17 +315,14 @@ if (typeof document !== 'undefined') {
 
 async function autoRestoreLatestSession() {
   try {
+    if (typeof localStorage === 'undefined') return;
     const latestId = localStorage.getItem('thp_latest_session_id');
-    let recordToRestore = null;
-    if (latestId) {
-      recordToRestore = await getHistoryById(latestId);
+    // If user clicked startNewSession / reset, latestId was removed.
+    // Do NOT fall back to old history records; keep the workspace fresh and clean.
+    if (!latestId) {
+      return;
     }
-    if (!recordToRestore) {
-      const allRecords = await getAllHistory();
-      if (allRecords.length > 0) {
-        recordToRestore = allRecords[0];
-      }
-    }
+    const recordToRestore = await getHistoryById(latestId);
     if (recordToRestore) {
       await restoreHistory(recordToRestore.id);
       updateAutoSaveIndicator('saved');
@@ -2992,6 +2989,10 @@ function revokeUserPhotoUrls() {
 }
 
 function startNewSession() {
+  if (typeof autoSaveTimer !== 'undefined' && autoSaveTimer) {
+    clearTimeout(autoSaveTimer);
+    autoSaveTimer = null;
+  }
   revokeUserPhotoUrls();
   state.receiptItems = [];
   state.excelMap.clear();
@@ -3008,21 +3009,35 @@ function startNewSession() {
   state.matcherApplyInfo = null;
   state.lastPreApplySnapshot = null;
 
-  localStorage.removeItem('thp_latest_cropped_receipt');
-  localStorage.removeItem('thp_latest_session_id');
+  if (typeof localStorage !== 'undefined') {
+    localStorage.removeItem('thp_latest_cropped_receipt');
+    localStorage.removeItem('thp_latest_session_id');
+  }
   updateAutoSaveIndicator('idle');
 
-  document.getElementById('trNumberInput').value = '';
-  document.getElementById('searchInput').value = '';
-  document.getElementById('imageFileInput').value = '';
-  document.getElementById('excelFileInput').value = '';
-  document.getElementById('zoomLevelIndicator').textContent = '100%';
+  if (typeof document !== 'undefined') {
+    const trInput = document.getElementById('trNumberInput');
+    if (trInput) trInput.value = '';
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput) searchInput.value = '';
+    const imageInput = document.getElementById('imageFileInput');
+    if (imageInput) imageInput.value = '';
+    const excelInput = document.getElementById('excelFileInput');
+    if (excelInput) excelInput.value = '';
+    const zoomInd = document.getElementById('zoomLevelIndicator');
+    if (zoomInd) zoomInd.textContent = '100%';
 
-  document.querySelectorAll('.filter-btn').forEach(btn => {
-    const isAll = btn.getAttribute('data-filter') === 'all';
-    btn.className = 'filter-btn px-2 py-0.5 rounded font-medium ' +
-      (isAll ? 'text-slate-700 bg-white shadow-xs' : 'text-slate-500');
-  });
+    document.querySelectorAll('.filter-btn').forEach(btn => {
+      const isAll = btn.getAttribute('data-filter') === 'all';
+      btn.className = 'filter-btn px-2 py-0.5 rounded font-medium ' +
+        (isAll ? 'text-slate-700 bg-white shadow-xs' : 'text-slate-500');
+    });
+
+    const pageManageList = document.getElementById('pageManageList');
+    if (pageManageList) pageManageList.innerHTML = '';
+    const modal = document.getElementById('pageManageModal');
+    if (modal) modal.classList.add('hidden');
+  }
 
   renderPhotoTabs();
   renderItems();
@@ -3106,6 +3121,7 @@ function setupPhotoControls() {
 
 function renderPhotoTabs() {
   const container = document.getElementById('photoTabsContainer');
+  if (!container) return;
   container.innerHTML = '';
 
   state.photos.forEach((photo, idx) => {
@@ -3125,9 +3141,13 @@ function renderPhotoTabs() {
 function switchPhoto(index, scrollRightList = false) {
   if (index < 0 || index >= state.photos.length) return;
   state.activePhotoIndex = index;
-  const img = document.getElementById('receiptImage');
-  img.classList.remove('hidden');
-  img.src = state.photos[index].file;
+  if (typeof document !== 'undefined') {
+    const img = document.getElementById('receiptImage');
+    if (img) {
+      img.classList.remove('hidden');
+      img.src = state.photos[index].file;
+    }
+  }
   renderPhotoTabs();
   updatePhotoIdentityBadge();
 
@@ -4426,6 +4446,11 @@ if (typeof window !== 'undefined') {
   window.processExcelRows = processExcelRows;
   window.findRangeReviewCandidate = findRangeReviewCandidate;
   window.evaluateExcelRangeReview = evaluateExcelRangeReview;
+  window.selectItem = selectItem;
+  window.switchPhoto = switchPhoto;
+  window.highlightItemNo = highlightItemNo;
+  window.startNewSession = startNewSession;
+  window.autoRestoreLatestSession = autoRestoreLatestSession;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -4455,7 +4480,12 @@ if (typeof module !== 'undefined' && module.exports) {
     fetchTrackingByTR,
     state,
     extractTrackingFromExcelRows,
-    processExcelRows
+    processExcelRows,
+    selectItem,
+    switchPhoto,
+    highlightItemNo,
+    startNewSession,
+    autoRestoreLatestSession
   };
 }
 
@@ -4815,7 +4845,10 @@ function renderItems() {
   }).sort((a, b) => Number(a.no) - Number(b.no));
 
   const isExcelSource = state.receiptItems.some(i => i.mappingSource === 'excel');
-  document.getElementById('countBadge').textContent = filtered.length + " รายการ" + (isExcelSource ? " (Excel)" : "");
+  const countBadgeEl = document.getElementById('countBadge');
+  if (countBadgeEl) {
+    countBadgeEl.textContent = filtered.length + " รายการ" + (isExcelSource ? " (Excel)" : "");
+  }
 
   if (filtered.length === 0) {
     container.innerHTML = `
@@ -4970,23 +5003,36 @@ function renderItems() {
 }
 
 function selectItem(item, scrollPhotoIntoPosition = true) {
+  if (!item) return;
   state.activeItemNo = item.no;
-  
-  if (typeof item.photoIndex === 'number' && item.photoIndex !== state.activePhotoIndex) {
+
+  const isValidPhoto = typeof item.photoIndex === 'number' &&
+    Number.isInteger(item.photoIndex) &&
+    item.photoIndex >= 0 &&
+    item.photoIndex < state.photos.length;
+
+  if (isValidPhoto && item.photoIndex !== state.activePhotoIndex) {
     switchPhoto(item.photoIndex, false);
   }
 
   highlightItemNo(item.no);
 
-  if (scrollPhotoIntoPosition) {
+  if (scrollPhotoIntoPosition && isValidPhoto && typeof document !== 'undefined') {
     const leftContainer = document.getElementById('receiptContainer');
-    const photoMeta = state.photos[item.photoIndex || 0];
-    if (photoMeta && photoMeta.startNo && photoMeta.endNo) {
-      const pageCount = photoMeta.endNo - photoMeta.startNo + 1;
-      const indexInPage = item.no - photoMeta.startNo;
-      const ratio = Math.max(0, Math.min(1, indexInPage / pageCount));
-      const targetScroll = (leftContainer.scrollHeight - leftContainer.clientHeight) * ratio;
-      leftContainer.scrollTo({ top: targetScroll, behavior: 'smooth' });
+    if (leftContainer) {
+      const photoMeta = state.photos[item.photoIndex];
+      if (photoMeta && Number.isFinite(photoMeta.startNo) && Number.isFinite(photoMeta.endNo) && photoMeta.endNo >= photoMeta.startNo) {
+        const pageCount = photoMeta.endNo - photoMeta.startNo + 1;
+        const indexInPage = item.no - photoMeta.startNo;
+        const ratio = Math.max(0, Math.min(1, indexInPage / pageCount));
+        const maxScroll = Math.max(0, leftContainer.scrollHeight - leftContainer.clientHeight);
+        const targetScroll = maxScroll * ratio;
+        if (typeof leftContainer.scrollTo === 'function') {
+          leftContainer.scrollTo({ top: targetScroll, behavior: 'smooth' });
+        } else {
+          leftContainer.scrollTop = targetScroll;
+        }
+      }
     }
   }
 }
@@ -5057,5 +5103,6 @@ function updateStats() {
     const excel = state.excelMap.get(cleanTrack);
     if (excel && excel.statusType === 'success') deliveredCount++;
   });
-  document.getElementById('statDelivered').textContent = deliveredCount;
+  const statDeliveredEl = document.getElementById('statDelivered');
+  if (statDeliveredEl) statDeliveredEl.textContent = deliveredCount;
 }
