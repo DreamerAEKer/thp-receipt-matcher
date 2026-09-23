@@ -22,6 +22,8 @@ const state = {
   matcherAppliedSignature: null,
   matcherApplyInfo: null,
   lastPreApplySnapshot: null,
+  trackSource: null, // 'api' | 'excel' | null
+  apiFeedback: null, // { type: 'empty' | 'quota' | 'auth_error', trCode, message } | null
   
   // Crop Editor State (Adobe Scan / Microsoft Lens Style)
   rawCaptureImage: null,
@@ -1383,10 +1385,6 @@ function alignReceiptItemsToPhotos() {
       if (item.mappingSource === 'matcher' && typeof item.photoIndex === 'number') {
         return;
       }
-      // Excel-imported items remain unmapped until confirmed by Matcher/evidence
-      if (item.mappingSource === 'excel' && (item.photoIndex === null || item.photoIndex === undefined)) {
-        return;
-      }
 
       const itemSeq = Number(item.no);
       let matchedIndex = -1;
@@ -1433,9 +1431,6 @@ function alignReceiptItemsToPhotos() {
     const totalItems = state.receiptItems.length;
     state.receiptItems.forEach((item, index) => {
       if (item.mappingSource === 'matcher' && typeof item.photoIndex === 'number') {
-        return;
-      }
-      if (item.mappingSource === 'excel' && (item.photoIndex === null || item.photoIndex === undefined)) {
         return;
       }
       item.photoIndex = totalPhotos > 0
@@ -3008,6 +3003,8 @@ function startNewSession() {
   state.matcherAppliedSignature = null;
   state.matcherApplyInfo = null;
   state.lastPreApplySnapshot = null;
+  state.trackSource = null;
+  state.apiFeedback = null;
 
   if (typeof localStorage !== 'undefined') {
     localStorage.removeItem('thp_latest_cropped_receipt');
@@ -3026,6 +3023,12 @@ function startNewSession() {
     if (excelInput) excelInput.value = '';
     const zoomInd = document.getElementById('zoomLevelIndicator');
     if (zoomInd) zoomInd.textContent = '100%';
+
+    const sourceBadgeEl = document.getElementById('sourceBadge');
+    if (sourceBadgeEl) {
+      sourceBadgeEl.textContent = '';
+      sourceBadgeEl.classList.add('hidden');
+    }
 
     document.querySelectorAll('.filter-btn').forEach(btn => {
       const isAll = btn.getAttribute('data-filter') === 'all';
@@ -3681,6 +3684,15 @@ async function fetchTrackingByTR(trNumber) {
   const { zip, trDigits, fullCode: fullTRCode } = buildReceiptCode(state.defaultZipPrefix, trNumber);
   const btnFetchTR = document.getElementById('btnFetchTR');
 
+  if (state.receiptItems.length > 0) {
+    const confirmReplace = confirm(
+      'ขณะนี้มีงานที่กำลังทำอยู่\nต้องการแทนที่รายการ Track เดิมด้วยข้อมูลใหม่หรือไม่?\n\n' +
+      '(กด ตกลง เพื่อเริ่มงานใหม่และดึงข้อมูล หรือ ยกเลิก เพื่อทำงานเดิมต่อ)'
+    );
+    if (!confirmReplace) return;
+    startNewSession();
+  }
+
   btnFetchTR.disabled = true;
   btnFetchTR.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
 
@@ -3702,6 +3714,8 @@ async function fetchTrackingByTR(trNumber) {
     const response = await requestReceiptTracking(fullTRCode);
 
     if (response.status === 401 || response.status === 403) {
+      state.apiFeedback = { type: 'auth_error' };
+      renderItems();
       const openSettings = confirm(
         'ระบบขอ Access Token ใหม่แล้ว แต่ยังไม่มีสิทธิ์เรียกข้อมูลใบเสร็จ\n' +
         'สถานะ: ' + response.status + '\n\nต้องการเปิดหน้าตั้งค่า Token หรือไม่?'
@@ -3711,11 +3725,15 @@ async function fetchTrackingByTR(trNumber) {
     }
 
     if (response.status === 429) {
+      state.apiFeedback = { type: 'quota', message: 'HTTP 429' };
+      renderItems();
       alert('เรียก API ถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง (สถานะ 429)');
       return;
     }
 
     if (response.status === 404) {
+      state.apiFeedback = { type: 'empty', trCode: fullTRCode };
+      renderItems();
       alert('ไม่พบข้อมูลเลข TR นี้ในระบบ API (รหัส: ' + fullTRCode + ')');
       return;
     }
@@ -3736,6 +3754,8 @@ async function fetchTrackingByTR(trNumber) {
       const isQuota = /quota|over\s*quota/i.test(msg);
 
       if (isQuota) {
+        state.apiFeedback = { type: 'quota', message: msg };
+        renderItems();
         alert('⚠️ API ปณท เกินโควตาการเรียกใช้งาน\n\nระบบ ปณท ปฏิเสธคำขอชั่วคราว: ' + msg);
       } else {
         alert('API ปณท ปฏิเสธคำขอ: ' + msg);
@@ -3745,15 +3765,21 @@ async function fetchTrackingByTR(trNumber) {
 
     const items = extractReceiptApiItems(json);
     if (Array.isArray(items) && items.length > 0) {
+      state.trackSource = 'api';
+      state.apiFeedback = null;
       processApiItems(items);
       alert('ดึงข้อมูลสำเร็จผ่าน API: ' + items.length + ' รายการ');
       return;
     }
 
+    state.apiFeedback = { type: 'empty', trCode: fullTRCode };
+    renderItems();
     alert('API ตอบกลับสำเร็จ แต่ไม่พบรายการสำหรับเลข TR นี้ (รหัส: ' + fullTRCode + ')');
   } catch (err) {
     console.error(err);
     if (err.message === 'AUTH_FAILED') {
+      state.apiFeedback = { type: 'auth_error' };
+      renderItems();
       const openSettings = confirm(
         'ไม่สามารถขอ Access Token จาก Token Key ได้\n' +
         'สถานะ: ' + (err.status || '-') +
@@ -4451,6 +4477,9 @@ if (typeof window !== 'undefined') {
   window.highlightItemNo = highlightItemNo;
   window.startNewSession = startNewSession;
   window.autoRestoreLatestSession = autoRestoreLatestSession;
+  window.alignReceiptItemsToPhotos = alignReceiptItemsToPhotos;
+  window.renderItems = renderItems;
+  window.handleExcelUpload = handleExcelUpload;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -4485,7 +4514,10 @@ if (typeof module !== 'undefined' && module.exports) {
     switchPhoto,
     highlightItemNo,
     startNewSession,
-    autoRestoreLatestSession
+    autoRestoreLatestSession,
+    alignReceiptItemsToPhotos,
+    renderItems,
+    handleExcelUpload
   };
 }
 
@@ -4527,6 +4559,8 @@ function processApiItems(items) {
 
   if (nextReceiptItems.length > 0) {
     state.receiptItems = nextReceiptItems;
+    state.trackSource = 'api';
+    state.apiFeedback = null;
     alignReceiptItemsToPhotos();
   }
 
@@ -4645,6 +4679,18 @@ function handleExcelUpload(e) {
   const file = e.target.files[0];
   if (!file) return;
 
+  if (state.receiptItems.length > 0) {
+    const confirmReplace = confirm(
+      'ขณะนี้มีงานที่กำลังทำอยู่\nต้องการแทนที่รายการ Track เดิมด้วยข้อมูลใหม่หรือไม่?\n\n' +
+      '(กด ตกลง เพื่อเริ่มงานใหม่และนำเข้า Excel หรือ ยกเลิก เพื่อทำงานเดิมต่อ)'
+    );
+    if (!confirmReplace) {
+      e.target.value = '';
+      return;
+    }
+    startNewSession();
+  }
+
   const reader = new FileReader();
   reader.onload = (evt) => {
     try {
@@ -4654,8 +4700,13 @@ function handleExcelUpload(e) {
       const json = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
       
       processExcelRows(json);
+      if (state.photos.length > 0) {
+        alignReceiptItemsToPhotos();
+      }
     } catch (err) {
       alert('เกิดข้อผิดพลาดในการอ่านไฟล์ Excel: ' + err.message);
+    } finally {
+      e.target.value = '';
     }
   };
   reader.readAsArrayBuffer(file);
@@ -4793,6 +4844,8 @@ function processExcelRows(rows) {
     if (typeof state !== 'undefined') {
       state.matcherAppliedSignature = null;
       state.matcherApplyInfo = null;
+      state.trackSource = 'excel';
+      state.apiFeedback = null;
     }
 
     let summaryMsg = `นำเข้า Tracking สำเร็จ ${result.uniqueCount} รายการ\n` +
@@ -4847,16 +4900,165 @@ function renderItems() {
   const isExcelSource = state.receiptItems.some(i => i.mappingSource === 'excel');
   const countBadgeEl = document.getElementById('countBadge');
   if (countBadgeEl) {
-    countBadgeEl.textContent = filtered.length + " รายการ" + (isExcelSource ? " (Excel)" : "");
+    countBadgeEl.textContent = filtered.length + " รายการ";
+  }
+
+  const sourceBadgeEl = document.getElementById('sourceBadge');
+  if (sourceBadgeEl) {
+    if (state.receiptItems.length > 0) {
+      const source = state.trackSource || (isExcelSource ? 'excel' : 'api');
+      sourceBadgeEl.textContent = source === 'excel' ? 'แหล่งข้อมูล: Excel' : 'แหล่งข้อมูล: Thailand Post API';
+      sourceBadgeEl.className = source === 'excel'
+        ? 'text-[10px] md:text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200'
+        : 'text-[10px] md:text-xs font-medium px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200';
+      sourceBadgeEl.classList.remove('hidden');
+    } else {
+      sourceBadgeEl.textContent = '';
+      sourceBadgeEl.classList.add('hidden');
+    }
   }
 
   if (filtered.length === 0) {
-    container.innerHTML = `
-      <div class="text-center py-8 text-slate-400 bg-white rounded-xl border border-dashed border-slate-300 p-4">
-        <i class="fa-solid fa-inbox text-2xl mb-1 text-slate-300"></i>
-        <p class="text-xs font-medium">${state.receiptItems.length === 0 ? 'ยังไม่มีข้อมูลงาน — ดึง TR หรือนำเข้า Excel เพื่อเริ่มต้น' : 'ไม่พบรายการที่ค้นหา'}</p>
-      </div>
-    `;
+    if (state.receiptItems.length > 0) {
+      container.innerHTML = `
+        <div class="text-center py-8 text-slate-400 bg-white rounded-xl border border-dashed border-slate-300 p-4">
+          <i class="fa-solid fa-magnifying-glass text-2xl mb-1 text-slate-300"></i>
+          <p class="text-xs font-medium">ไม่พบรายการที่ค้นหา</p>
+        </div>
+      `;
+      return;
+    }
+
+    if (state.apiFeedback?.type === 'empty') {
+      container.innerHTML = `
+        <div class="bg-amber-50/90 rounded-2xl border border-amber-300 p-5 shadow-xs space-y-3.5 max-w-md mx-auto my-6 text-center">
+          <div class="w-12 h-12 mx-auto rounded-full bg-amber-100 border border-amber-300 flex items-center justify-center text-amber-600 text-xl">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-amber-900">ไม่พบรายการ Track จากเลข TR นี้</h3>
+            <p class="text-xs text-amber-800 mt-1 leading-relaxed">
+              ระบบเชื่อมต่อ Thailand Post API สำเร็จ แต่ API ไม่ได้ส่งรายการ Track กลับมา
+            </p>
+            ${state.apiFeedback.trCode ? `<p class="text-[11px] text-slate-500 mt-1 font-mono">(รหัส: ${escapeHtml(state.apiFeedback.trCode)})</p>` : ''}
+            <p class="text-xs text-slate-700 font-medium mt-2.5">
+              หากคุณมีไฟล์รายการ Track แนะนำให้นำเข้าจาก Excel เพื่อทำงานต่อ
+            </p>
+          </div>
+          <div class="flex flex-col sm:flex-row gap-2 justify-center pt-1">
+            <button type="button" id="btnGuideExcel" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+              <i class="fa-solid fa-file-excel"></i> นำเข้าจาก Excel
+            </button>
+            <button type="button" id="btnGuideRetryTR" class="px-3 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-lg text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+              <i class="fa-solid fa-rotate-right"></i> ตรวจสอบเลข TR อีกครั้ง
+            </button>
+          </div>
+        </div>
+      `;
+    } else if (state.apiFeedback?.type === 'quota') {
+      container.innerHTML = `
+        <div class="bg-rose-50/90 rounded-2xl border border-rose-300 p-5 shadow-xs space-y-3.5 max-w-md mx-auto my-6 text-center">
+          <div class="w-12 h-12 mx-auto rounded-full bg-rose-100 border border-rose-300 flex items-center justify-center text-rose-600 text-xl">
+            <i class="fa-solid fa-hand"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-rose-900">Thailand Post API จำกัดการเรียกใช้งานชั่วคราว</h3>
+            <p class="text-xs text-rose-800 mt-1 leading-relaxed">
+              หากต้องการทำงานต่อทันที สามารถนำเข้ารายการจาก Excel ได้
+            </p>
+          </div>
+          <div class="flex justify-center pt-1">
+            <button type="button" id="btnGuideExcel" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+              <i class="fa-solid fa-file-excel"></i> นำเข้าจาก Excel
+            </button>
+          </div>
+        </div>
+      `;
+    } else if (state.apiFeedback?.type === 'auth_error') {
+      container.innerHTML = `
+        <div class="bg-rose-50/90 rounded-2xl border border-rose-300 p-5 shadow-xs space-y-3.5 max-w-md mx-auto my-6 text-center">
+          <div class="w-12 h-12 mx-auto rounded-full bg-rose-100 border border-rose-300 flex items-center justify-center text-rose-600 text-xl">
+            <i class="fa-solid fa-key"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-rose-900">ไม่สามารถยืนยันสิทธิ์ API ได้</h3>
+            <p class="text-xs text-rose-800 mt-1 leading-relaxed">
+              กรุณาตรวจสอบ Token Key หรือนำเข้าข้อมูลจาก Excel
+            </p>
+          </div>
+          <div class="flex flex-col sm:flex-row gap-2 justify-center pt-1">
+            <button type="button" id="btnGuideApiSettings" class="px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+              <i class="fa-solid fa-gear"></i> ตั้งค่า API
+            </button>
+            <button type="button" id="btnGuideExcel" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+              <i class="fa-solid fa-file-excel"></i> นำเข้าจาก Excel
+            </button>
+          </div>
+        </div>
+      `;
+    } else {
+      container.innerHTML = `
+        <div class="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs text-center space-y-4 max-w-md mx-auto my-6">
+          <div class="w-12 h-12 mx-auto rounded-full bg-slate-100 flex items-center justify-center text-slate-500 text-xl">
+            <i class="fa-solid fa-inbox"></i>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-800">ยังไม่มีรายการ Track</h3>
+            <p class="text-xs text-slate-500 mt-1">เลือกวิธีนำเข้าข้อมูลเพื่อเริ่มงาน</p>
+          </div>
+          <div class="p-3.5 bg-slate-50 rounded-xl border border-slate-200 text-left space-y-2 text-xs">
+            <div class="font-bold text-slate-700">เริ่มต้นนำเข้ารายการ Track:</div>
+            <div class="space-y-2 text-slate-600">
+              <div class="flex items-start gap-2">
+                <span class="font-bold text-red-600 shrink-0">•</span>
+                <div><strong>ดึงจากเลข TR:</strong> เหมาะเมื่อมีเลข TR และระบบ Thailand Post API สามารถค้นพบรายการ</div>
+              </div>
+              <div class="flex items-start gap-2">
+                <span class="font-bold text-emerald-600 shrink-0">•</span>
+                <div><strong>นำเข้าจาก Excel:</strong> เหมาะเมื่อมีไฟล์รายการ Track อยู่แล้ว หรือ API ไม่พบรายการ / ไม่พร้อมใช้งาน</div>
+              </div>
+            </div>
+          </div>
+          <div class="flex flex-col sm:flex-row gap-2 justify-center pt-1">
+            <button type="button" id="btnGuideFetchTR" class="px-3.5 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+              <i class="fa-solid fa-cloud-arrow-down"></i> ดึงจากเลข TR
+            </button>
+            <button type="button" id="btnGuideExcel" class="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 transition cursor-pointer">
+              <i class="fa-solid fa-file-excel"></i> นำเข้าจาก Excel
+            </button>
+          </div>
+        </div>
+      `;
+    }
+
+    const btnExcel = container.querySelector('#btnGuideExcel');
+    if (btnExcel) {
+      btnExcel.onclick = () => {
+        const input = document.getElementById('excelFileInput');
+        if (input) input.click();
+      };
+    }
+    const btnFetchTR = container.querySelector('#btnGuideFetchTR');
+    if (btnFetchTR) {
+      btnFetchTR.onclick = () => {
+        const input = document.getElementById('trNumberInput');
+        if (input) input.focus();
+      };
+    }
+    const btnRetryTR = container.querySelector('#btnGuideRetryTR');
+    if (btnRetryTR) {
+      btnRetryTR.onclick = () => {
+        const input = document.getElementById('trNumberInput');
+        if (input) input.focus();
+      };
+    }
+    const btnApiSettings = container.querySelector('#btnGuideApiSettings');
+    if (btnApiSettings) {
+      btnApiSettings.onclick = () => {
+        const btnOpen = document.getElementById('btnOpenApiModal');
+        if (btnOpen) btnOpen.click();
+      };
+    }
     return;
   }
 
