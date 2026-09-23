@@ -803,6 +803,85 @@ function findRangeReviewCandidate(seq, apiItems, allSeqs = [], currentPhotoIndex
 }
 
 /**
+ * Pure evaluation of sequence range against actual imported Excel tracks array.
+ * Calculates expected quantity and boundary relationships from array indices.
+ * NEVER uses numeric serial arithmetic, check-digit fabrication, or tracking guessing.
+ */
+function evaluateExcelRangeReview(seq, apiItems = null) {
+  if (!seq || typeof seq !== 'object') return null;
+  const normFirst = cleanTrackNo(seq.firstTrack);
+  const normLast = cleanTrackNo(seq.lastTrack);
+  if (!normFirst || !normLast || normFirst === normLast) {
+    return null;
+  }
+
+  const items = Array.isArray(apiItems)
+    ? apiItems
+    : (typeof state !== 'undefined' && Array.isArray(state?.receiptItems) ? state.receiptItems : []);
+  if (items.length === 0) return null;
+
+  let startIdx = -1;
+  let endIdx = -1;
+  for (let i = 0; i < items.length; i++) {
+    const t = cleanTrackNo(items[i]?.barcode || items[i]?.track_no || items[i]?.trackNo || (typeof items[i] === 'string' ? items[i] : ''));
+    if (t === normFirst && startIdx === -1) {
+      startIdx = i;
+    }
+    if (t === normLast && endIdx === -1) {
+      endIdx = i;
+    }
+    if (startIdx !== -1 && endIdx !== -1) break;
+  }
+
+  if (startIdx === -1 || endIdx === -1) {
+    return null;
+  }
+
+  if (startIdx > endIdx) {
+    return {
+      status: 'conflict',
+      startIndex: startIdx,
+      endIndex: endIdx,
+      expectedQty: null,
+      reason: 'ลำดับเลขพัสดุกลับด้าน (First Track อยู่หลัง Last Track ใน Excel)'
+    };
+  }
+
+  const expectedQty = endIdx - startIdx + 1;
+  const rawQty = seq.qty;
+  const hasQty = rawQty !== null && rawQty !== undefined && rawQty !== '' && Number(rawQty) > 0;
+
+  if (hasQty) {
+    const declaredQty = Number(rawQty);
+    if (declaredQty === expectedQty) {
+      return {
+        status: 'match',
+        startIndex: startIdx,
+        endIndex: endIdx,
+        expectedQty: expectedQty,
+        reason: `ช่วงใน Excel ตรงกับจำนวน ${expectedQty} รายการ`
+      };
+    } else {
+      return {
+        status: 'conflict',
+        startIndex: startIdx,
+        endIndex: endIdx,
+        expectedQty: expectedQty,
+        reason: `จำนวนบนใบเสร็จ ${declaredQty} แต่ช่วงใน Excel มี ${expectedQty} รายการ`
+      };
+    }
+  }
+
+  return {
+    status: 'qty_suggested',
+    startIndex: startIdx,
+    endIndex: endIdx,
+    expectedQty: expectedQty,
+    reason: `Excel ช่วงนี้มี ${expectedQty} รายการ`
+  };
+}
+
+/**
  * Parses line items from OCR lines and returns non-binding suggestion objects.
  * Never modifies photo.sequences directly.
  */
@@ -836,8 +915,9 @@ function parseReceiptLineEvidence(lines, rcptNo = null, apiItems = []) {
     if (tracks.length > 0) {
       const first = tracks[0].normalized;
       const last = tracks.length > 1 ? tracks[1].normalized : first;
-      // Rule 8: Range without printed qty keeps qty null (never fabricate qty)
-      let qty = tracks.length > 1 ? null : 1;
+      // Rule: Range (first !== last) without printed qty MUST keep qty null (never default to 1)
+      const isRange = tracks.length > 1 && first !== last;
+      let qty = isRange ? null : 1;
 
       const qtyMatch = text.match(/(?:จำนวน\s*(\d+)|(\d+)\s*ชิ้น|qty\s*[:\.]?\s*(\d+))/i);
       if (qtyMatch) {
@@ -854,6 +934,7 @@ function parseReceiptLineEvidence(lines, rcptNo = null, apiItems = []) {
         seqNo: currentSeq !== null ? currentSeq : null,
         firstTrack: first,
         lastTrack: last,
+        printedFirstTrack: first,
         printedLastTrack: last,
         qty: qty,
         rawText: currentRaw || text,
@@ -923,12 +1004,19 @@ function confirmOcrSuggestion(photoIndex, suggestionId, editedValues = null) {
   const finalSeqNo = (editedValues && editedValues.seqNo !== undefined) ? (Number(editedValues.seqNo) || null) : sug.seqNo;
   const finalFirst = (editedValues && editedValues.firstTrack !== undefined) ? cleanTrackNo(editedValues.firstTrack) : sug.firstTrack;
   let finalLast = (editedValues && editedValues.lastTrack !== undefined) ? cleanTrackNo(editedValues.lastTrack) : sug.lastTrack;
+  const finalPrintedFirst = (editedValues && editedValues.printedFirstTrack !== undefined)
+    ? editedValues.printedFirstTrack
+    : (sug.printedFirstTrack || sug.firstTrack || null);
   const finalPrintedLast = (editedValues && editedValues.printedLastTrack !== undefined)
     ? editedValues.printedLastTrack
     : (sug.printedLastTrack || sug.lastTrack || null);
-  let finalQty = (editedValues && editedValues.qty !== undefined) ? (Number(editedValues.qty) || 1) : sug.qty;
 
-  if (finalFirst && (!finalLast || finalLast === finalFirst)) {
+  const isSingle = finalFirst && (!finalLast || finalLast === finalFirst);
+  let finalQty = (editedValues && editedValues.qty !== undefined)
+    ? (editedValues.qty !== null && Number(editedValues.qty) > 0 ? Number(editedValues.qty) : (isSingle ? 1 : null))
+    : (sug.qty !== null && Number(sug.qty) > 0 ? Number(sug.qty) : (isSingle ? 1 : null));
+
+  if (isSingle) {
     finalLast = finalFirst;
     if (!finalQty) finalQty = 1;
   }
@@ -938,6 +1026,7 @@ function confirmOcrSuggestion(photoIndex, suggestionId, editedValues = null) {
     seqNo: finalSeqNo,
     firstTrack: finalFirst,
     lastTrack: finalLast,
+    printedFirstTrack: finalPrintedFirst,
     printedLastTrack: finalPrintedLast,
     qty: finalQty,
     provenance: 'manual',
@@ -976,15 +1065,55 @@ function rejectOcrSuggestion(photoIndex, suggestionId) {
 
 /**
  * Batch confirmation of all pending suggestions for a photo.
+ * Safe rule: Confirms ONLY rows with validation === 'strong', no ambiguity, and complete fields.
+ * Skips rows with conflict or missing/invalid range qty and alerts summary.
  */
 function confirmAllOcrSuggestions(photoIndex) {
   const photo = state.photos[photoIndex];
   if (!photo || !Array.isArray(photo.ocrSequenceSuggestions)) return;
 
   const pending = photo.ocrSequenceSuggestions.filter(s => s.status === 'pending');
+  const allSeqs = [];
+  (state.photos || []).forEach(p => (p.sequences || []).forEach(s => allSeqs.push(s)));
+
+  let confirmedCount = 0;
+  let skippedCount = 0;
+
   pending.forEach(sug => {
-    confirmOcrSuggestion(photoIndex, sug.id);
+    const isSingle = sug.firstTrack && (!sug.lastTrack || sug.lastTrack === sug.firstTrack);
+    const hasQty = isSingle || (sug.qty !== null && sug.qty !== undefined && Number(sug.qty) > 0);
+    const val = evaluateSequenceValidation({
+      seqNo: sug.seqNo,
+      firstTrack: sug.firstTrack,
+      lastTrack: sug.lastTrack,
+      qty: sug.qty
+    }, photo.detectedRcpt, allSeqs);
+
+    const isStrong = val && val.status === 'strong';
+    const hasAmbiguity = sug.reviewCandidate?.status === 'ambiguous';
+    const hasRequiredFields = Boolean(sug.firstTrack && hasQty);
+
+    if (isStrong && !hasAmbiguity && hasRequiredFields) {
+      confirmOcrSuggestion(photoIndex, sug.id);
+      confirmedCount++;
+    } else {
+      skippedCount++;
+    }
   });
+
+  if (typeof alert === 'function') {
+    if (confirmedCount > 0 && skippedCount > 0) {
+      alert(`ยืนยันสำเร็จ ${confirmedCount} รายการ / ข้าม ${skippedCount} รายการที่ต้องตรวจสอบ`);
+    } else if (confirmedCount > 0 && skippedCount === 0) {
+      alert(`ยืนยันสำเร็จทั้งหมด ${confirmedCount} รายการ`);
+    } else {
+      alert(`ไม่สามารถยืนยันได้ (ข้ามทั้ง ${skippedCount} รายการเนื่องจากยังติดข้อขัดแย้งหรือต้องตรวจสอบ)`);
+    }
+  }
+
+  if (typeof renderPageManageList === 'function' && typeof document !== 'undefined') {
+    renderPageManageList();
+  }
 }
 
 /**
@@ -1921,20 +2050,21 @@ function setupPageManager() {
  * Evaluates validation status of a single sequence row against the track index
  * and checks for duplicate identity (rcptNo:seqNo).
  */
-function evaluateSequenceValidation(seq, rcptNo, allSeqs) {
+function evaluateSequenceValidation(seq, rcptNo, allSeqs, apiItems = null) {
   const normFirst = cleanTrackNo(seq.firstTrack);
   let normLast = cleanTrackNo(seq.lastTrack);
   const seqNo = Number(seq.seqNo);
-  let qty = Number(seq.qty) || 1;
+  const isSingle = normFirst && (!normLast || normLast === normFirst);
+  const hasExplicitQty = seq.qty !== null && seq.qty !== undefined && seq.qty !== '' && Number(seq.qty) > 0;
+  let qty = hasExplicitQty ? Number(seq.qty) : (isSingle ? 1 : null);
 
-  if (normFirst && (!normLast || normLast === normFirst)) {
+  if (isSingle) {
     normLast = normFirst;
-    if (!seq.qty) qty = 1;
   }
 
   // 1. Check Duplicate Identity (same rcptNo + same seqNo)
   if (rcptNo && Number.isFinite(seqNo)) {
-    const matchingDuplicates = allSeqs.filter(item => {
+    const matchingDuplicates = (allSeqs || []).filter(item => {
       const itemRcpt = String(item.rcptNo || '').trim();
       const itemSeqNo = Number(item.seqNo);
       return itemRcpt === String(rcptNo).trim() && itemSeqNo === seqNo;
@@ -1960,7 +2090,10 @@ function evaluateSequenceValidation(seq, rcptNo, allSeqs) {
   }
 
   // 3. Match against API items if available
-  const hasApiItems = Array.isArray(state?.receiptItems) && state.receiptItems.length > 0;
+  const targetItems = Array.isArray(apiItems)
+    ? apiItems
+    : (typeof state !== 'undefined' && Array.isArray(state?.receiptItems) ? state.receiptItems : []);
+  const hasApiItems = targetItems.length > 0;
   if (!hasApiItems) {
     return {
       status: 'pending',
@@ -1970,13 +2103,44 @@ function evaluateSequenceValidation(seq, rcptNo, allSeqs) {
     };
   }
 
+  // Range-specific validations when normFirst !== normLast
+  if (!isSingle && normFirst && normLast) {
+    if (qty === null) {
+      const rangeReview = evaluateExcelRangeReview(seq, targetItems);
+      if (rangeReview && rangeReview.status === 'qty_suggested') {
+        return {
+          status: 'conflict',
+          badge: '✕ CONFLICT',
+          badgeClass: 'bg-rose-100 text-rose-800 border-rose-300',
+          reasonText: `✕ ยังไม่ระบุจำนวน Qty (Excel ช่วงนี้มี ${rangeReview.expectedQty} รายการ)`
+        };
+      }
+      return {
+        status: 'conflict',
+        badge: '✕ CONFLICT',
+        badgeClass: 'bg-rose-100 text-rose-800 border-rose-300',
+        reasonText: '✕ ยังไม่ได้ระบุจำนวน (Qty) สำหรับช่วงพัสดุ'
+      };
+    }
+
+    const rangeReview = evaluateExcelRangeReview({ ...seq, qty }, targetItems);
+    if (rangeReview && rangeReview.status === 'conflict') {
+      return {
+        status: 'conflict',
+        badge: '✕ CONFLICT',
+        badgeClass: 'bg-rose-100 text-rose-800 border-rose-300',
+        reasonText: `✕ ${rangeReview.reason}`
+      };
+    }
+  }
+
   // Pure match evaluation via Matcher engine
   const matcher = (typeof window !== 'undefined' && window.Matcher)
     ? window.Matcher
-    : (typeof Matcher !== 'undefined' ? Matcher : null);
+    : (typeof Matcher !== 'undefined' ? Matcher : (typeof require !== 'undefined' ? require('./matcher.js') : null));
 
   if (matcher) {
-    const { trackMap, apiTracks } = matcher.buildTrackIndex(state.receiptItems);
+    const { trackMap, apiTracks } = matcher.buildTrackIndex(targetItems);
     const mockSeq = {
       rcptNo: rcptNo || null,
       seqNo: Number.isFinite(seqNo) ? seqNo : null,
@@ -2309,8 +2473,31 @@ function renderPageManageList() {
                       ${pendingSuggestions.length} รายการ
                     </span>
                   </div>
-                  <button type="button" class="btn-confirm-all-sug px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-semibold flex items-center gap-1 transition shadow-sm" data-page-index="${idx}">
-                    <i class="fa-solid fa-check-double text-[10px]"></i> ยืนยันทั้งหมด (${pendingSuggestions.length})
+                  <button type="button" class="btn-confirm-all-sug px-2 py-0.5 ${(() => {
+                    const readyCount = pendingSuggestions.filter(sug => {
+                      const isSingle = sug.firstTrack && (!sug.lastTrack || sug.lastTrack === sug.firstTrack);
+                      const hasQty = isSingle || (sug.qty !== null && sug.qty !== undefined && Number(sug.qty) > 0);
+                      const val = evaluateSequenceValidation({
+                        seqNo: sug.seqNo,
+                        firstTrack: sug.firstTrack,
+                        lastTrack: sug.lastTrack,
+                        qty: sug.qty
+                      }, photo.detectedRcpt, allSeqs);
+                      return val && val.status === 'strong' && sug.reviewCandidate?.status !== 'ambiguous' && Boolean(sug.firstTrack && hasQty);
+                    }).length;
+                    return readyCount > 0 ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-400 opacity-60';
+                  })()} text-white rounded text-[10px] font-semibold flex items-center gap-1 transition shadow-sm" data-page-index="${idx}">
+                    <i class="fa-solid fa-check-double text-[10px]"></i> ยืนยันรายการที่พร้อม (${pendingSuggestions.filter(sug => {
+                      const isSingle = sug.firstTrack && (!sug.lastTrack || sug.lastTrack === sug.firstTrack);
+                      const hasQty = isSingle || (sug.qty !== null && sug.qty !== undefined && Number(sug.qty) > 0);
+                      const val = evaluateSequenceValidation({
+                        seqNo: sug.seqNo,
+                        firstTrack: sug.firstTrack,
+                        lastTrack: sug.lastTrack,
+                        qty: sug.qty
+                      }, photo.detectedRcpt, allSeqs);
+                      return val && val.status === 'strong' && sug.reviewCandidate?.status !== 'ambiguous' && Boolean(sug.firstTrack && hasQty);
+                    }).length}/${pendingSuggestions.length})
                   </button>
                 </div>
                 <div class="overflow-x-auto">
@@ -2320,7 +2507,7 @@ function renderPageManageList() {
                         <th class="p-1.5 text-center w-12">Seq#</th>
                         <th class="p-1.5">First Track (แก้ไขได้)</th>
                         <th class="p-1.5">Last Track (เว้นว่างถ้าเดี่ยว)</th>
-                        <th class="p-1.5 text-center w-12">Qty</th>
+                        <th class="p-1.5 text-center w-14">Qty</th>
                         <th class="p-1.5 text-center w-16">OCR Conf.</th>
                         <th class="p-1.5">สถานะ Matcher</th>
                         <th class="p-1.5 text-center w-28">การดำเนินการ</th>
@@ -2330,6 +2517,7 @@ function renderPageManageList() {
                       ${pendingSuggestions.map(sug => {
                         const val = evaluateSequenceValidation({ seqNo: sug.seqNo, firstTrack: sug.firstTrack, lastTrack: sug.lastTrack, qty: sug.qty }, photo.detectedRcpt, allSeqs);
                         const lTrackDisplay = (sug.firstTrack && sug.lastTrack && sug.firstTrack === sug.lastTrack) ? '' : (sug.lastTrack || '');
+                        const isSingle = sug.firstTrack && (!sug.lastTrack || sug.lastTrack === sug.firstTrack);
                         return `
                           <tr class="border-b border-amber-100 hover:bg-amber-50/40 transition" data-sug-row="${sug.id}">
                             <td class="p-1 text-center">
@@ -2339,15 +2527,21 @@ function renderPageManageList() {
                             <td class="p-1">
                               <input type="text" class="input-sug-first w-full min-w-[125px] px-2 py-1 text-xs border border-amber-300 rounded font-mono uppercase bg-white"
                                      value="${sug.firstTrack || ''}" placeholder="First Track" data-page-index="${idx}" data-sug-id="${sug.id}">
+                              ${sug.printedFirstTrack && sug.printedFirstTrack !== sug.firstTrack ? `
+                                <div class="mt-0.5 text-[9px] text-emerald-700 font-medium flex items-center gap-1">
+                                  <i class="fa-solid fa-check text-emerald-600"></i> ใช้เลขจาก Excel แล้ว
+                                  <span class="text-slate-400 font-mono">(เดิม: ${escapeHtml(sug.printedFirstTrack)})</span>
+                                </div>
+                              ` : ''}
                               ${(() => {
                                 const cand = sug.reviewCandidate || findApiTrackCandidate(sug.firstTrack, state?.receiptItems || []);
                                 if (!cand) return '';
                                 if (cand.status === 'single_match') {
                                   return `
                                     <div class="mt-1 flex items-center justify-between gap-1 text-[10px] bg-blue-50 border border-blue-200 text-blue-900 px-1.5 py-0.5 rounded">
-                                      <span class="truncate" title="พบเลขพัสดุใกล้เคียงในระบบ API">อาจเป็น: <strong class="font-mono text-blue-700">${cand.candidate}</strong> (diff ${cand.distance})</span>
+                                      <span class="truncate" title="พบเลขพัสดุใกล้เคียงในระบบ Excel">อาจเป็น: <strong class="font-mono text-blue-700">${cand.candidate}</strong> (diff ${cand.distance})</span>
                                       <button type="button" class="btn-use-candidate shrink-0 px-1.5 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[9px] font-medium transition shadow-2xs"
-                                              data-page-index="${idx}" data-sug-id="${sug.id}" data-candidate="${cand.candidate}">
+                                              data-page-index="${idx}" data-sug-id="${sug.id}" data-candidate="${cand.candidate}" data-printed-first="${escapeHtml(sug.firstTrack)}">
                                         ใช้เลขนี้
                                       </button>
                                     </div>
@@ -2361,7 +2555,7 @@ function renderPageManageList() {
                                 } else if (cand.status === 'none' && val.status === 'conflict') {
                                   return `
                                     <div class="mt-1 text-[10px] text-slate-400 italic">
-                                      ไม่พบเลขใกล้เคียงใน API
+                                      ไม่พบเลขใกล้เคียงใน Excel
                                     </div>
                                   `;
                                 }
@@ -2371,6 +2565,12 @@ function renderPageManageList() {
                             <td class="p-1">
                               <input type="text" class="input-sug-last w-full min-w-[125px] px-2 py-1 text-xs border border-amber-300 rounded font-mono uppercase bg-white"
                                      value="${lTrackDisplay}" placeholder="เว้นว่างถ้าเดี่ยว" data-page-index="${idx}" data-sug-id="${sug.id}">
+                              ${sug.printedLastTrack && sug.printedLastTrack !== sug.lastTrack ? `
+                                <div class="mt-0.5 text-[9px] text-emerald-700 font-medium flex items-center gap-1">
+                                  <i class="fa-solid fa-check text-emerald-600"></i> ใช้เลขจาก Excel แล้ว
+                                  <span class="text-slate-400 font-mono">(เดิม: ${escapeHtml(sug.printedLastTrack)})</span>
+                                </div>
+                              ` : ''}
                               ${(() => {
                                 if (val.status === 'conflict' && sug.firstTrack && sug.qty > 1) {
                                   const rangeCand = findRangeReviewCandidate({ firstTrack: sug.firstTrack, lastTrack: sug.lastTrack, qty: sug.qty }, state?.receiptItems || [], allSeqs, idx);
@@ -2403,15 +2603,29 @@ function renderPageManageList() {
                                 }
                                 return '';
                               })()}
-                              ${sug.printedLastTrack && sug.printedLastTrack !== sug.lastTrack ? `
-                                <div class="mt-0.5 text-[9px] text-slate-400 font-mono" title="หลักฐานที่พิมพ์บนใบเสร็จเดิม">
-                                  (เลขพิมพ์เดิม: ${escapeHtml(sug.printedLastTrack)})
-                                </div>
-                              ` : ''}
                             </td>
                             <td class="p-1 text-center">
-                              <input type="number" min="1" class="input-sug-qty w-12 px-1 py-1 text-xs border border-amber-300 rounded font-mono text-center bg-white"
-                                     value="${sug.qty ?? 1}" placeholder="Qty" data-page-index="${idx}" data-sug-id="${sug.id}">
+                              <input type="number" min="1" class="input-sug-qty w-12 px-1 py-1 text-xs border ${!isSingle && (sug.qty === null || sug.qty === undefined || sug.qty === '') ? 'border-rose-400 bg-rose-50/80 font-bold text-rose-700' : 'border-amber-300'} rounded font-mono text-center bg-white"
+                                     value="${sug.qty !== null && sug.qty !== undefined ? sug.qty : (isSingle ? 1 : '')}"
+                                     placeholder="${isSingle ? '1' : 'Qty'}"
+                                     data-page-index="${idx}" data-sug-id="${sug.id}">
+                              ${(() => {
+                                if (!isSingle && (sug.qty === null || sug.qty === undefined || sug.qty === '')) {
+                                  const rangeReview = evaluateExcelRangeReview(sug, state?.receiptItems || []);
+                                  if (rangeReview && rangeReview.status === 'qty_suggested') {
+                                    return `
+                                      <div class="mt-1 p-1 bg-sky-50 border border-sky-300 rounded text-[9px] text-sky-900 text-center space-y-0.5">
+                                        <span class="block truncate">Excel: <strong>${rangeReview.expectedQty}</strong> ชิ้น</span>
+                                        <button type="button" class="btn-use-excel-qty w-full px-1 py-0.5 bg-sky-600 hover:bg-sky-700 text-white rounded text-[9px] font-semibold transition"
+                                                data-page-index="${idx}" data-sug-id="${sug.id}" data-qty="${rangeReview.expectedQty}">
+                                          ใช้ ${rangeReview.expectedQty}
+                                        </button>
+                                      </div>
+                                    `;
+                                  }
+                                }
+                                return '';
+                              })()}
                             </td>
                             <td class="p-1 text-center">
                               <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 text-slate-700 border border-slate-300">
@@ -2509,7 +2723,19 @@ function renderPageManageList() {
         const sNo = parseInt(row.querySelector('.input-sug-seq')?.value, 10) || null;
         const fTrack = cleanTrackNo(row.querySelector('.input-sug-first')?.value);
         const lTrack = cleanTrackNo(row.querySelector('.input-sug-last')?.value);
-        const qVal = parseInt(row.querySelector('.input-sug-qty')?.value, 10) || 1;
+        const rawQtyStr = row.querySelector('.input-sug-qty')?.value?.trim();
+        const isSingle = fTrack && (!lTrack || lTrack === fTrack);
+        const qVal = rawQtyStr !== '' ? parseInt(rawQtyStr, 10) : (isSingle ? 1 : null);
+
+        const sugId = e.target.getAttribute('data-sug-id');
+        const sug = state.photos[pIdx]?.ocrSequenceSuggestions?.find(s => String(s.id) === String(sugId));
+        if (sug) {
+          sug.seqNo = sNo;
+          sug.firstTrack = fTrack;
+          sug.lastTrack = lTrack;
+          sug.qty = qVal;
+        }
+
         const badgeEl = row.querySelector('.sug-matcher-badge');
         if (badgeEl) {
           const val = evaluateSequenceValidation({ seqNo: sNo, firstTrack: fTrack, lastTrack: lTrack, qty: qVal }, state.photos[pIdx]?.detectedRcpt, allSeqs);
@@ -2540,13 +2766,18 @@ function renderPageManageList() {
   container.querySelectorAll('.btn-use-candidate').forEach(btn => {
     btn.onclick = (e) => {
       const candidate = e.currentTarget.getAttribute('data-candidate');
-      const row = e.currentTarget.closest('[data-sug-row]');
-      if (row && candidate) {
-        const inputFirst = row.querySelector('.input-sug-first');
-        if (inputFirst) {
-          inputFirst.value = candidate;
-          inputFirst.dispatchEvent(new Event('input', { bubbles: true }));
+      const printedFirst = e.currentTarget.getAttribute('data-printed-first');
+      const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
+      const sugId = e.currentTarget.getAttribute('data-sug-id');
+      const sug = state.photos[pIdx]?.ocrSequenceSuggestions?.find(s => String(s.id) === String(sugId));
+      if (sug && candidate) {
+        if (!sug.printedFirstTrack) {
+          sug.printedFirstTrack = printedFirst || sug.firstTrack;
         }
+        sug.firstTrack = candidate;
+        sug.firstCandidateApplied = true;
+        sug.reviewCandidate = null;
+        renderPageManageList();
       }
     };
   });
@@ -2560,21 +2791,27 @@ function renderPageManageList() {
       const sugId = e.currentTarget.getAttribute('data-sug-id');
       const sug = state.photos[pIdx]?.ocrSequenceSuggestions?.find(s => String(s.id) === String(sugId));
       if (sug && candidate) {
-        if (printedLast && !sug.printedLastTrack) {
-          sug.printedLastTrack = printedLast;
-        } else if (!sug.printedLastTrack) {
-          sug.printedLastTrack = sug.lastTrack;
+        if (!sug.printedLastTrack) {
+          sug.printedLastTrack = printedLast || sug.lastTrack;
         }
         sug.lastTrack = candidate;
+        sug.lastCandidateApplied = true;
+        renderPageManageList();
       }
-      const row = e.currentTarget.closest('[data-sug-row]');
-      if (row && candidate) {
-        if (printedLast) row.setAttribute('data-printed-last', printedLast);
-        const inputLast = row.querySelector('.input-sug-last');
-        if (inputLast) {
-          inputLast.value = candidate;
-          inputLast.dispatchEvent(new Event('input', { bubbles: true }));
-        }
+    };
+  });
+
+  // Handle "ใช้จำนวน N" for Excel range count in OCR suggestions (DOES NOT auto-confirm)
+  container.querySelectorAll('.btn-use-excel-qty').forEach(btn => {
+    btn.onclick = (e) => {
+      const qtyVal = parseInt(e.currentTarget.getAttribute('data-qty'), 10);
+      const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
+      const sugId = e.currentTarget.getAttribute('data-sug-id');
+      const sug = state.photos[pIdx]?.ocrSequenceSuggestions?.find(s => String(s.id) === String(sugId));
+      if (sug && Number.isFinite(qtyVal) && qtyVal > 0) {
+        sug.qty = qtyVal;
+        sug.qtyAppliedFromExcel = true;
+        renderPageManageList();
       }
     };
   });
@@ -2588,20 +2825,11 @@ function renderPageManageList() {
       const printedLast = e.currentTarget.getAttribute('data-printed-last');
       const seq = state.photos[pIdx]?.sequences?.[sIdx];
       if (seq && candidate) {
-        if (printedLast && !seq.printedLastTrack) {
-          seq.printedLastTrack = printedLast;
-        } else if (!seq.printedLastTrack) {
-          seq.printedLastTrack = seq.lastTrack;
+        if (!seq.printedLastTrack) {
+          seq.printedLastTrack = printedLast || seq.lastTrack;
         }
         seq.lastTrack = candidate;
-        const row = e.currentTarget.closest('[data-seq-row]');
-        if (row) {
-          const inputLast = row.querySelector('.input-seq-last');
-          if (inputLast) {
-            inputLast.value = candidate;
-            inputLast.dispatchEvent(new Event('input', { bubbles: true }));
-          }
-        }
+        renderPageManageList();
       }
     };
   });
@@ -2613,12 +2841,25 @@ function renderPageManageList() {
       const sugId = e.currentTarget.getAttribute('data-sug-id');
       const sug = state.photos[pIdx]?.ocrSequenceSuggestions?.find(s => String(s.id) === String(sugId));
       const row = e.currentTarget.closest('[data-sug-row]');
+
+      const first = row ? cleanTrackNo(row.querySelector('.input-sug-first')?.value) : sug?.firstTrack;
+      const last = row ? cleanTrackNo(row.querySelector('.input-sug-last')?.value) : sug?.lastTrack;
+      const rawQtyStr = row ? row.querySelector('.input-sug-qty')?.value?.trim() : '';
+      const isSingle = first && (!last || last === first);
+      let qtyVal = rawQtyStr !== '' ? parseInt(rawQtyStr, 10) : (sug?.qty ?? (isSingle ? 1 : null));
+
+      if (!isSingle && (qtyVal === null || isNaN(qtyVal) || qtyVal <= 0)) {
+        alert('กรุณาระบุจำนวน (Qty) ของช่วงพัสดุก่อนยืนยัน');
+        return;
+      }
+
       const editedValues = row ? {
         seqNo: parseInt(row.querySelector('.input-sug-seq')?.value, 10) || null,
-        firstTrack: cleanTrackNo(row.querySelector('.input-sug-first')?.value),
-        lastTrack: cleanTrackNo(row.querySelector('.input-sug-last')?.value),
+        firstTrack: first,
+        lastTrack: last,
+        printedFirstTrack: row.getAttribute('data-printed-first') || sug?.printedFirstTrack || null,
         printedLastTrack: row.getAttribute('data-printed-last') || sug?.printedLastTrack || null,
-        qty: parseInt(row.querySelector('.input-sug-qty')?.value, 10) || 1
+        qty: qtyVal
       } : null;
       confirmOcrSuggestion(pIdx, sugId, editedValues);
     };
@@ -4184,6 +4425,7 @@ if (typeof window !== 'undefined') {
   window.extractTrackingFromExcelRows = extractTrackingFromExcelRows;
   window.processExcelRows = processExcelRows;
   window.findRangeReviewCandidate = findRangeReviewCandidate;
+  window.evaluateExcelRangeReview = evaluateExcelRangeReview;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -4193,6 +4435,7 @@ if (typeof module !== 'undefined' && module.exports) {
     levenshteinDistance,
     findApiTrackCandidate,
     findRangeReviewCandidate,
+    evaluateExcelRangeReview,
     parseReceiptLineEvidence,
     confirmOcrSuggestion,
     rejectOcrSuggestion,
