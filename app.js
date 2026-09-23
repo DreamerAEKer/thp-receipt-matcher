@@ -593,7 +593,14 @@ function preprocessLinesForOcr(imageSource, hasHeader = true) {
 function extractTrackCandidates(text) {
   const candidates = [];
   if (!text || typeof text !== 'string') return candidates;
-  const regex = /(?:^|[\s,;:])([A-Za-z0-9]{2})\s*([0-9\s]{8,14})\s*([A-Za-z0-9]{2})(?=$|[\s,;:.!?])/g;
+
+  // Filter out TAX ID, POS, RC, TR headers / non-tracking lines
+  if (/TAX\s*ID|TAX\s*INVOICE|POS[:\s]|เลขประจำตัวผู้เสียภาษี|REPT|ABB/i.test(text)) {
+    return candidates;
+  }
+
+  // Universal Postal Union (S10): 2-letter service prefix + 8-10 digits + 2-letter country suffix
+  const regex = /(?:^|[\s,;:\(\)\[\]\|\-])([A-Za-z]{2})\s*([0-9\s]{8,14})\s*([A-Za-z]{2})(?=$|[\s,;:.!?\(\)\[\]\|\-])/g;
   let m;
   while ((m = regex.exec(text)) !== null) {
     const prefix = m[1];
@@ -601,10 +608,12 @@ function extractTrackCandidates(text) {
     const suffix = m[3];
     if (middleDigits.length >= 8 && middleDigits.length <= 10) {
       const full = cleanTrackNo(prefix + middleDigits + suffix);
-      candidates.push({
-        raw: m[0].trim(),
-        normalized: full
-      });
+      if (/^[A-Za-z]{2}\d{8,10}[A-Za-z]{2}$/.test(full)) {
+        candidates.push({
+          raw: m[0].trim(),
+          normalized: full
+        });
+      }
     }
   }
   return candidates;
@@ -892,13 +901,42 @@ function parseReceiptLineEvidence(lines, rcptNo = null, apiItems = []) {
   let currentRaw = '';
   let currentConf = 0;
   let confCount = 0;
+  let activeSuggestion = null;
+
+  function finalizeActiveSuggestion() {
+    if (!activeSuggestion) return;
+    if (activeSuggestion.explicitQty) {
+      activeSuggestion.qty = activeSuggestion.explicitQty;
+    } else if (activeSuggestion.atQuantities && activeSuggestion.atQuantities.length > 0) {
+      const allEqual = activeSuggestion.atQuantities.every(q => q === activeSuggestion.atQuantities[0]);
+      if (allEqual) {
+        activeSuggestion.qty = activeSuggestion.atQuantities[0];
+      } else {
+        // Conflicting service quantities -> set null to require review
+        activeSuggestion.qty = null;
+      }
+    } else {
+      activeSuggestion.qty = activeSuggestion.isRange ? null : 1;
+    }
+    delete activeSuggestion.atQuantities;
+    delete activeSuggestion.explicitQty;
+    delete activeSuggestion.isRange;
+    activeSuggestion = null;
+  }
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const text = (line.text || '').trim();
     if (!text) continue;
 
-    const seqMatch = text.match(/^\s*(\d{1,4})\s*[\.\,\:\;\-]\s*(.*)$/);
+    // Check for sequence number header: e.g. "1.", "1 ", "1 จดหมาย...", "2. ..."
+    const seqMatch = text.match(/^\s*(\d{1,4})\s*[\.\,\:\;\-]\s*(.*)$/) ||
+                     text.match(/^\s*(\d{1,4})\s+(?:จดหมาย|พัสดุ|ems|ลงทะเบียน|[A-Za-z])/i);
+
+    if (seqMatch && activeSuggestion) {
+      finalizeActiveSuggestion();
+    }
+
     if (seqMatch) {
       currentSeq = parseInt(seqMatch[1], 10);
       currentRaw = text;
@@ -912,22 +950,19 @@ function parseReceiptLineEvidence(lines, rcptNo = null, apiItems = []) {
 
     const tracks = extractTrackCandidates(text);
     if (tracks.length > 0) {
-      const first = tracks[0].normalized;
-      const last = tracks.length > 1 ? tracks[1].normalized : first;
-      // Rule: Range (first !== last) without printed qty MUST keep qty null (never default to 1)
-      const isRange = tracks.length > 1 && first !== last;
-      let qty = isRange ? null : 1;
-
-      const qtyMatch = text.match(/(?:จำนวน\s*(\d+)|(\d+)\s*ชิ้น|qty\s*[:\.]?\s*(\d+))/i);
-      if (qtyMatch) {
-        const q = parseInt(qtyMatch[1] || qtyMatch[2] || qtyMatch[3], 10);
-        if (!isNaN(q) && q > 0) qty = q;
+      if (activeSuggestion) {
+        finalizeActiveSuggestion();
       }
 
-      const avgConf = confCount > 0 ? Math.round(currentConf / confCount) : Math.round(line.confidence || 0);
-      const candidateInfo = findApiTrackCandidate(first, apiItems);
+      const first = tracks[0].normalized;
+      const last = tracks.length > 1 ? tracks[1].normalized : first;
+      const isRange = tracks.length > 1 && first !== last;
 
-      suggestions.push({
+      const avgConf = confCount > 0 ? Math.round(currentConf / confCount) : Math.round(line.confidence || 0);
+      const firstCandidate = findApiTrackCandidate(first, apiItems);
+      const lastCandidate = (tracks.length > 1) ? findApiTrackCandidate(last, apiItems) : firstCandidate;
+
+      const sug = {
         id: 'sug_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
         rcptNo: rcptNo || null,
         seqNo: currentSeq !== null ? currentSeq : null,
@@ -935,19 +970,58 @@ function parseReceiptLineEvidence(lines, rcptNo = null, apiItems = []) {
         lastTrack: last,
         printedFirstTrack: first,
         printedLastTrack: last,
-        qty: qty,
+        qty: isRange ? null : 1,
         rawText: currentRaw || text,
         confidence: avgConf,
         provenance: 'ocr',
         status: 'pending',
-        reviewCandidate: candidateInfo
-      });
+        reviewCandidate: firstCandidate,
+        firstCandidate: firstCandidate,
+        lastCandidate: lastCandidate,
+        isRange,
+        atQuantities: [],
+        explicitQty: null
+      };
+
+      // Check for explicit qty on the track line itself
+      const qtyMatch = text.match(/(?:จำนวน\s*(\d+)|(\d+)\s*ชิ้น|qty\s*[:\.]?\s*(\d+))/i);
+      if (qtyMatch) {
+        const q = parseInt(qtyMatch[1] || qtyMatch[2] || qtyMatch[3], 10);
+        if (!isNaN(q) && q > 0) sug.explicitQty = q;
+      }
+
+      // Check for @ quantity on the track line itself
+      const atRegex = /(?:^|[\s,;:])(\d{1,4})\s*[@©]\s*[\d\.\,]+/g;
+      let atM;
+      while ((atM = atRegex.exec(text)) !== null) {
+        const q = parseInt(atM[1], 10);
+        if (!isNaN(q) && q > 0) sug.atQuantities.push(q);
+      }
+
+      suggestions.push(sug);
+      activeSuggestion = sug;
 
       currentSeq = null;
       currentRaw = '';
       confCount = 0;
+    } else if (activeSuggestion) {
+      // Lines following tracks (fees, service breakdown) before next sequence
+      const qtyMatch = text.match(/(?:จำนวน\s*(\d+)|(\d+)\s*ชิ้น|qty\s*[:\.]?\s*(\d+))/i);
+      if (qtyMatch) {
+        const q = parseInt(qtyMatch[1] || qtyMatch[2] || qtyMatch[3], 10);
+        if (!isNaN(q) && q > 0) activeSuggestion.explicitQty = q;
+      }
+
+      const atRegex = /(?:^|[\s,;:])(\d{1,4})\s*[@©]\s*[\d\.\,]+/g;
+      let atM;
+      while ((atM = atRegex.exec(text)) !== null) {
+        const q = parseInt(atM[1], 10);
+        if (!isNaN(q) && q > 0) activeSuggestion.atQuantities.push(q);
+      }
     }
   }
+
+  finalizeActiveSuggestion();
 
   return suggestions;
 }
@@ -976,6 +1050,8 @@ async function scanPhotoLineEvidence(photoIndex) {
     photo.ocrSequenceSuggestions = suggestions;
     photo.ocrLinesStatus = 'done';
     photo.ocrLinesConfidence = data.confidence || 0;
+
+    alignReceiptItemsToPhotos();
   } catch (err) {
     console.warn('OCR Line extraction error:', err);
     photo.ocrLinesStatus = 'error';
@@ -1365,6 +1441,397 @@ function chainReceiptPhotosBySequence(photos) {
   return orderedResult;
 }
 
+/**
+ * Calculates a scroll ratio (0..1) for a sequence within a receipt photo.
+ * If precise visual position (bbox / yRatio / positionAnchor) is available, uses it.
+ * Otherwise, estimates based on sequence order within the photo:
+ * - Single sequence: 0.15 (upper area)
+ * - Multiple sequences: distributed from 0.15 (upper) to 0.85 (lower).
+ *
+ * All items belonging to the same sequence share the exact same anchor.
+ */
+function getSequenceScrollAnchor(seq, sIdx = 0, totalSeqsInPhoto = 1) {
+  if (seq) {
+    if (typeof seq.scrollAnchor === 'number' && Number.isFinite(seq.scrollAnchor)) {
+      return Math.max(0, Math.min(1, seq.scrollAnchor));
+    }
+    if (typeof seq.yRatio === 'number' && Number.isFinite(seq.yRatio)) {
+      return Math.max(0, Math.min(1, seq.yRatio));
+    }
+    if (typeof seq.positionAnchor === 'number' && Number.isFinite(seq.positionAnchor)) {
+      return Math.max(0, Math.min(1, seq.positionAnchor));
+    }
+  }
+
+  const total = Math.max(1, Number(totalSeqsInPhoto) || 1);
+  const idx = Math.max(0, Number(sIdx) || 0);
+
+  if (total <= 1) {
+    return 0.15; // Upper area
+  }
+  if (total === 2) {
+    return idx === 0 ? 0.20 : 0.70;
+  }
+  return 0.15 + (idx / (total - 1)) * 0.70;
+}
+
+/**
+ * Resolves confirmed / reliable receipt sequence ranges against the actual imported items list.
+ *
+ * Rules:
+ * 1. Normalize firstTrack and lastTrack (whitespace/case only, zero arithmetic, zero fuzzy replacement).
+ * 2. Lookup exact matches in receiptItems.
+ * 3. startIndex <= endIndex.
+ * 4. actualQty = endIndex - startIndex + 1.
+ * 5. If declared qty is present, actualQty must match declared qty.
+ * 6. Conflict / Ambiguity protection:
+ *    - Anchor missing -> CONFLICT (do not map)
+ *    - Order reversed -> CONFLICT (do not map)
+ *    - Duplicate exact barcode in actual items -> AMBIGUOUS_TRACK (do not map)
+ *    - Overlapping / conflicting sequence ranges -> COLLISION (do not map)
+ * 7. When resolved (STRONG):
+ *    - Every item in [startIndex..endIndex] mapped to sequence's photoIndex, receiptSeqNo, and position anchor.
+ *    - Marked with mappingSource = 'receipt-range'.
+ *    - Preserves existing mappingSource === 'matcher' intact (never overwrites).
+ *
+ * @param {object[]} photos
+ * @param {object[]} items
+ * @returns {{ resolvedCount: number, mappedTrackCount: number, evaluatedSequences: object[] }}
+ */
+/**
+ * Resolves confirmed / reliable receipt sequence ranges against the actual imported items list.
+ *
+ * SAFE RANGE RESOLUTION RULES (ACTUAL ARRAY INDEX ONLY):
+ * - CASE 1: Exact First + Exact Last + Qty -> AUTO RESOLVE STRONG
+ * - CASE 2: Exact First + Qty (printed Last not in Excel or nominal endpoint)
+ *           -> startIndex through (startIndex + qty - 1) in Excel -> AUTO RESOLVE STRONG
+ * - CASE 3: Exact Last + Qty (First not exact)
+ *           -> (endIndex - qty + 1) through endIndex in Excel -> AUTO RESOLVE STRONG
+ * - CASE 4: Single item (qty === 1 with unique exact anchor) -> AUTO RESOLVE STRONG
+ *
+ * CROSS-SEQUENCE & ADJACENCY VALIDATION:
+ * - Order & Overlap validation: ranges cannot overlap or violate visual sequence order.
+ * - Adjacency validation: consecutive sequences (e.g. Seq 1 ending at 48 and Seq 2 starting at 49)
+ *   provide mutual boundary confirmation.
+ * - Safety: Duplicate exact anchors, out-of-bounds slices, or missing quantities are marked NEEDS REVIEW.
+ * - Audit Trail: Preserves printedFirstTrack & printedLastTrack; records resolvedLastTrack.
+ *
+ * @param {object[]} photos
+ * @param {object[]} items
+ * @returns {{ resolvedCount: number, mappedTrackCount: number, needsReviewCount: number, evaluatedSequences: object[] }}
+ */
+function resolveReceiptRanges(photos = state.photos, items = state.receiptItems) {
+  if (!Array.isArray(photos) || photos.length === 0 || !Array.isArray(items) || items.length === 0) {
+    return { resolvedCount: 0, mappedTrackCount: 0, needsReviewCount: 0, evaluatedSequences: [] };
+  }
+
+  const matcher = (typeof window !== 'undefined' && window.Matcher)
+    ? window.Matcher
+    : (typeof Matcher !== 'undefined' ? Matcher : (typeof require !== 'undefined' ? require('./matcher.js') : null));
+
+  if (!matcher) {
+    return { resolvedCount: 0, mappedTrackCount: 0, needsReviewCount: 0, evaluatedSequences: [] };
+  }
+
+  // 1. Build lookup index with duplicate detection (reuses matcher.buildTrackIndex)
+  const { trackMap, apiTracks } = matcher.buildTrackIndex(items);
+
+  // 2. Collect candidate sequences per photo (deduplicating between photo.sequences and photo.ocrSequenceSuggestions)
+  const photoSeqGroups = [];
+  photos.forEach((photo, pIdx) => {
+    if (!photo) return;
+    const seqs = [];
+    const seenKeys = new Set();
+    if (Array.isArray(photo.sequences)) {
+      photo.sequences.forEach((s, idx) => {
+        seqs.push({ ...s, _sIdx: idx, _source: 'photo.sequences', _origSeq: s });
+        const key = s.id || `${s.seqNo}_${cleanTrackNo(s.firstTrack)}`;
+        seenKeys.add(key);
+      });
+    }
+    if (Array.isArray(photo.ocrSequenceSuggestions)) {
+      photo.ocrSequenceSuggestions
+        .filter(s => s && s.status !== 'rejected')
+        .forEach((s, idx) => {
+          const key = s.id || `${s.seqNo}_${cleanTrackNo(s.firstTrack)}`;
+          if (!seenKeys.has(key)) {
+            seqs.push({ ...s, _sIdx: idx, _source: 'ocrSequenceSuggestions', _origSeq: s });
+            seenKeys.add(key);
+          }
+        });
+    }
+    if (seqs.length > 0) {
+      photoSeqGroups.push({ photoIndex: pIdx, photo, sequences: seqs });
+    }
+  });
+
+  // 3. Evaluate each candidate sequence under Safe Range Resolution Rules
+  const evaluatedSequences = [];
+  photoSeqGroups.forEach(({ photoIndex, photo, sequences }) => {
+    const totalInPhoto = sequences.length;
+    sequences.forEach((seq, sIdx) => {
+      const normFirst = cleanTrackNo(seq.firstTrack);
+      const normLast = cleanTrackNo(seq.lastTrack);
+      const rawQty = seq.qty;
+      const qty = (rawQty !== null && rawQty !== undefined && rawQty !== '') ? Number(rawQty) : null;
+      const sSeqNo = (seq.seqNo !== null && seq.seqNo !== undefined && seq.seqNo !== '') ? Number(seq.seqNo) : null;
+      const sRcpt = seq.rcptNo || photo.detectedRcpt || null;
+
+      const printedFirstTrack = seq.printedFirstTrack || seq.firstTrack || null;
+      const printedLastTrack = seq.printedLastTrack || seq.lastTrack || null;
+
+      let confidence = 'needs_review';
+      let conflictReason = null;
+      let startIndex = null;
+      let endIndex = null;
+      let trackIndexes = [];
+      let resolvedFirstTrack = null;
+      let resolvedLastTrack = null;
+      let resolutionCase = null;
+
+      const firstEntry = normFirst ? trackMap.get(normFirst) : null;
+      const lastEntry = normLast ? trackMap.get(normLast) : null;
+
+      const firstAmbiguous = Boolean(firstEntry && firstEntry.AMBIGUOUS);
+      const lastAmbiguous = Boolean(lastEntry && lastEntry.AMBIGUOUS);
+
+      let effectiveFirstEntry = (firstEntry && !firstEntry.AMBIGUOUS) ? firstEntry : null;
+      let effectiveLastEntry = (lastEntry && !lastEntry.AMBIGUOUS) ? lastEntry : null;
+      let firstFromCandidate = false;
+      let lastFromCandidate = false;
+
+      // Excel-assisted candidate resolution for OCR typos (Strictly from actual items array, zero tracking arithmetic)
+      if (!effectiveFirstEntry && !firstAmbiguous && normFirst) {
+        const cand = seq.firstCandidate || (seq.reviewCandidate?.status ? seq.reviewCandidate : findApiTrackCandidate(normFirst, items));
+        if (cand && cand.status === 'single_match' && cand.candidate) {
+          const cEntry = trackMap.get(cand.candidate);
+          if (cEntry && !cEntry.AMBIGUOUS) {
+            effectiveFirstEntry = cEntry;
+            firstFromCandidate = true;
+          }
+        }
+      }
+
+      if (!effectiveLastEntry && !lastAmbiguous && normLast) {
+        const cand = seq.lastCandidate || findApiTrackCandidate(normLast, items);
+        if (cand && cand.status === 'single_match' && cand.candidate) {
+          const cEntry = trackMap.get(cand.candidate);
+          if (cEntry && !cEntry.AMBIGUOUS) {
+            effectiveLastEntry = cEntry;
+            lastFromCandidate = true;
+          }
+        }
+      }
+
+      if (firstAmbiguous || lastAmbiguous) {
+        confidence = 'conflict';
+        conflictReason = 'duplicate / ambiguous tracking anchor in actual tracks';
+      } else if (!effectiveFirstEntry && !effectiveLastEntry) {
+        confidence = 'weak';
+        conflictReason = 'neither firstTrack nor lastTrack found in actual tracks';
+      } else {
+        const isSingle = (effectiveFirstEntry && effectiveLastEntry && effectiveFirstEntry.trackNo === effectiveLastEntry.trackNo && (qty === 1 || qty === null))
+          || (qty === 1 && (effectiveFirstEntry || effectiveLastEntry));
+
+        if (isSingle) {
+          // ── CASE 4: Single Item ──
+          const idx = effectiveFirstEntry ? effectiveFirstEntry.apiIndex : effectiveLastEntry.apiIndex;
+          startIndex = idx;
+          endIndex = idx;
+          trackIndexes = [idx];
+          resolvedFirstTrack = apiTracks[idx].trackNo;
+          resolvedLastTrack = apiTracks[idx].trackNo;
+          confidence = 'strong';
+          resolutionCase = (firstFromCandidate || lastFromCandidate) ? 'CASE 4 (Single Item - Excel Candidate)' : 'CASE 4 (Single Item)';
+        } else if (effectiveFirstEntry && effectiveLastEntry && qty !== null && qty > 0) {
+          // ── CASE 1: Exact First + Exact Last + Qty ──
+          const sIdx = effectiveFirstEntry.apiIndex;
+          const eIdx = effectiveLastEntry.apiIndex;
+          if (sIdx > eIdx) {
+            confidence = 'conflict';
+            conflictReason = `reversed order: firstTrack index (${sIdx}) > lastTrack index (${eIdx})`;
+          } else {
+            const actualLen = eIdx - sIdx + 1;
+            if (actualLen !== qty) {
+              confidence = 'conflict';
+              conflictReason = `qty mismatch: declared ${qty} but Excel slice is ${actualLen}`;
+            } else {
+              startIndex = sIdx;
+              endIndex = eIdx;
+              for (let i = sIdx; i <= eIdx; i++) trackIndexes.push(i);
+              resolvedFirstTrack = apiTracks[sIdx].trackNo;
+              resolvedLastTrack = apiTracks[eIdx].trackNo;
+              confidence = 'strong';
+              resolutionCase = (firstFromCandidate || lastFromCandidate) ? 'CASE 1 (Excel-assisted First + Last + Qty)' : 'CASE 1 (Exact First + Last + Qty)';
+            }
+          }
+        } else if (effectiveFirstEntry && qty !== null && qty > 0) {
+          // ── CASE 2: Exact First + Qty (printed Last not in Excel or nominal endpoint) ──
+          const sIdx = effectiveFirstEntry.apiIndex;
+          const targetEndIndex = sIdx + qty - 1;
+          if (targetEndIndex >= items.length) {
+            confidence = 'conflict';
+            conflictReason = `out of bounds: startIndex (${sIdx}) + qty (${qty}) exceeds total items (${items.length})`;
+          } else {
+            startIndex = sIdx;
+            endIndex = targetEndIndex;
+            for (let i = sIdx; i <= targetEndIndex; i++) trackIndexes.push(i);
+            resolvedFirstTrack = apiTracks[sIdx].trackNo;
+            resolvedLastTrack = apiTracks[targetEndIndex].trackNo;
+            confidence = 'strong';
+            resolutionCase = firstFromCandidate ? 'CASE 2 (Excel-assisted First + Qty)' : 'CASE 2 (Exact First + Qty)';
+          }
+        } else if (effectiveLastEntry && qty !== null && qty > 0) {
+          // ── CASE 3: Exact Last + Qty (First not exact) ──
+          const eIdx = effectiveLastEntry.apiIndex;
+          const targetStartIndex = eIdx - qty + 1;
+          if (targetStartIndex < 0) {
+            confidence = 'conflict';
+            conflictReason = `out of bounds: endIndex (${eIdx}) - qty (${qty}) is negative`;
+          } else {
+            startIndex = targetStartIndex;
+            endIndex = eIdx;
+            for (let i = targetStartIndex; i <= eIdx; i++) trackIndexes.push(i);
+            resolvedFirstTrack = apiTracks[targetStartIndex].trackNo;
+            resolvedLastTrack = apiTracks[eIdx].trackNo;
+            confidence = 'strong';
+            resolutionCase = lastFromCandidate ? 'CASE 3 (Excel-assisted Last + Qty)' : 'CASE 3 (Exact Last + Qty)';
+          }
+        } else {
+          confidence = 'needs_review';
+          conflictReason = qty === null || qty <= 0 ? 'missing or invalid quantity' : 'incomplete track anchors';
+        }
+      }
+
+      const anchor = getSequenceScrollAnchor(seq, sIdx, totalInPhoto);
+
+      evaluatedSequences.push({
+        photoIndex,
+        photo,
+        seqIndex: sIdx,
+        seq,
+        confidence,
+        conflictReason,
+        startIndex,
+        endIndex,
+        trackIndexes,
+        resolvedFirstTrack,
+        resolvedLastTrack,
+        printedFirstTrack,
+        printedLastTrack,
+        resolutionCase,
+        scrollAnchor: anchor,
+        rcptNo: sRcpt,
+        seqNo: sSeqNo,
+        qty: qty || (trackIndexes.length > 0 ? trackIndexes.length : null)
+      });
+    });
+  });
+
+  // 4. Cross-Sequence Validation: Collision, Overlap & Order Check
+  const claimedIndices = new Map();
+  const collisionEntries = new Set();
+
+  evaluatedSequences.forEach(entry => {
+    if (entry.confidence === 'strong') {
+      for (const trackIdx of entry.trackIndexes) {
+        if (claimedIndices.has(trackIdx)) {
+          const prevEntry = claimedIndices.get(trackIdx);
+          collisionEntries.add(entry);
+          collisionEntries.add(prevEntry);
+          entry.confidence = 'conflict';
+          entry.conflictReason = `overlapping range with Seq ${prevEntry.seqNo ?? '-'} at track index ${trackIdx}`;
+          prevEntry.confidence = 'conflict';
+          prevEntry.conflictReason = `overlapping range with Seq ${entry.seqNo ?? '-'} at track index ${trackIdx}`;
+        }
+      }
+      if (!collisionEntries.has(entry)) {
+        entry.trackIndexes.forEach(trackIdx => claimedIndices.set(trackIdx, entry));
+      }
+    }
+  });
+
+  // Check sequence order & adjacency across photos
+  const allStrong = evaluatedSequences
+    .filter(e => e.confidence === 'strong')
+    .sort((a, b) => (a.photoIndex !== b.photoIndex ? a.photoIndex - b.photoIndex : a.seqIndex - b.seqIndex));
+
+  for (let i = 0; i < allStrong.length - 1; i++) {
+    const cur = allStrong[i];
+    const nxt = allStrong[i + 1];
+    if (cur.startIndex > nxt.startIndex) {
+      cur.confidence = 'conflict';
+      cur.conflictReason = `order conflict: startIndex (${cur.startIndex}) > following sequence startIndex (${nxt.startIndex})`;
+      nxt.confidence = 'conflict';
+      nxt.conflictReason = `order conflict: startIndex (${nxt.startIndex}) < preceding sequence startIndex (${cur.startIndex})`;
+    } else if (cur.endIndex + 1 === nxt.startIndex) {
+      cur.isAdjacentValidated = true;
+      nxt.isAdjacentValidated = true;
+    }
+  }
+
+  // 5. Apply STRONG non-conflicting ranges to items
+  let resolvedCount = 0;
+  let mappedTrackCount = 0;
+  let needsReviewCount = 0;
+
+  evaluatedSequences.forEach(entry => {
+    if (entry.confidence === 'strong') {
+      resolvedCount++;
+      entry.trackIndexes.forEach(trackIdx => {
+        const item = items[trackIdx];
+        if (item) {
+          // Rule: Never overwrite user-confirmed matcher mapping
+          if (item.mappingSource === 'matcher') {
+            return;
+          }
+          item.photoIndex = entry.photoIndex;
+          item.receiptSeqNo = entry.seqNo;
+          item.receiptSequenceId = entry.seq.id || (entry.rcptNo ? `${entry.rcptNo}:${entry.seqNo}` : `seq_${entry.photoIndex}_${entry.seqIndex}`);
+          item.rcptNo = entry.rcptNo;
+          item.mappingSource = 'receipt-range';
+          item.scrollAnchor = entry.scrollAnchor;
+          mappedTrackCount++;
+        }
+      });
+
+      // Update sequence properties for audit trail
+      const targetSeq = entry.seq?._origSeq || entry.seq;
+      if (targetSeq) {
+        targetSeq.printedFirstTrack = entry.printedFirstTrack;
+        targetSeq.printedLastTrack = entry.printedLastTrack;
+        targetSeq.resolvedFirstTrack = entry.resolvedFirstTrack;
+        targetSeq.resolvedLastTrack = entry.resolvedLastTrack;
+        targetSeq.autoResolved = true;
+        targetSeq.mappingConfidence = 'strong';
+        if (entry.seq?._source === 'ocrSequenceSuggestions') {
+          targetSeq.status = 'auto_resolved';
+          targetSeq.firstTrack = entry.resolvedFirstTrack;
+          targetSeq.lastTrack = entry.resolvedLastTrack;
+        }
+      }
+    } else {
+      needsReviewCount++;
+      const targetSeq = entry.seq?._origSeq || entry.seq;
+      if (targetSeq) {
+        targetSeq.autoResolved = false;
+        targetSeq.mappingConfidence = entry.confidence;
+        targetSeq.mappingConflictReason = entry.conflictReason;
+        if (targetSeq.status === 'auto_resolved') {
+          targetSeq.status = 'pending';
+        }
+      }
+    }
+  });
+
+  return {
+    resolvedCount,
+    mappedTrackCount,
+    needsReviewCount,
+    evaluatedSequences
+  };
+}
+
 function alignReceiptItemsToPhotos() {
   // Sort receipt items strictly by their sequence no
   state.receiptItems = state.receiptItems
@@ -1373,72 +1840,80 @@ function alignReceiptItemsToPhotos() {
     .map(entry => entry.item);
 
   const totalPhotos = state.photos.length;
-  if (totalPhotos === 0) return;
+  if (totalPhotos === 0 || state.receiptItems.length === 0) return;
 
-  // Check if any photo has defined sequence ranges (manual override or parsed)
-  const hasConfiguredRanges = state.photos.some(p => Number.isFinite(p.startNo) && Number.isFinite(p.endNo));
+  // 1. Resolve confirmed / reliable receipt ranges
+  resolveReceiptRanges(state.photos, state.receiptItems);
 
-  if (hasConfiguredRanges) {
-    // Map items to photo by matching item.no into [photo.startNo, photo.endNo]
-    state.receiptItems.forEach(item => {
-      // If item already has an active verified Matcher mapping, preserve it
-      if (item.mappingSource === 'matcher' && typeof item.photoIndex === 'number') {
-        return;
-      }
+  // 2. Check which items still need fallback mapping
+  const unmappedItems = state.receiptItems.filter(item =>
+    item.mappingSource !== 'matcher' && item.mappingSource !== 'receipt-range'
+  );
 
-      const itemSeq = Number(item.no);
-      let matchedIndex = -1;
-      let alternateIndex = -1;
+  if (unmappedItems.length > 0) {
+    const hasConfiguredRanges = state.photos.some(p => Number.isFinite(p.startNo) && Number.isFinite(p.endNo));
 
-      for (let pIdx = 0; pIdx < state.photos.length; pIdx++) {
-        const photo = state.photos[pIdx];
-        if (Number.isFinite(photo.startNo) && Number.isFinite(photo.endNo)) {
-          if (itemSeq >= photo.startNo && itemSeq <= photo.endNo) {
-            if (matchedIndex === -1) {
-              matchedIndex = pIdx;
-            } else {
-              alternateIndex = pIdx; // Overlap on multiple photos!
-            }
-          }
-        }
-      }
+    if (hasConfiguredRanges) {
+      unmappedItems.forEach(item => {
+        const itemSeq = Number(item.no);
+        let matchedIndex = -1;
+        let alternateIndex = -1;
 
-      if (matchedIndex !== -1) {
-        item.photoIndex = matchedIndex;
-        if (alternateIndex !== -1) {
-          item.alternatePhotoIndex = alternateIndex;
-        } else {
-          delete item.alternatePhotoIndex;
-        }
-      } else {
-        // Outside known ranges: find closest photo boundary
-        let closestIdx = 0;
-        let minDiff = Infinity;
-        state.photos.forEach((photo, pIdx) => {
+        for (let pIdx = 0; pIdx < state.photos.length; pIdx++) {
+          const photo = state.photos[pIdx];
           if (Number.isFinite(photo.startNo) && Number.isFinite(photo.endNo)) {
-            const diff = Math.min(Math.abs(itemSeq - photo.startNo), Math.abs(itemSeq - photo.endNo));
-            if (diff < minDiff) {
-              minDiff = diff;
-              closestIdx = pIdx;
+            if (itemSeq >= photo.startNo && itemSeq <= photo.endNo) {
+              if (matchedIndex === -1) {
+                matchedIndex = pIdx;
+              } else {
+                alternateIndex = pIdx;
+              }
             }
           }
-        });
-        item.photoIndex = closestIdx;
-      }
-    });
-  } else {
-    // If photos do NOT have ranges defined yet, distribute proportionally
-    const totalItems = state.receiptItems.length;
-    state.receiptItems.forEach((item, index) => {
-      if (item.mappingSource === 'matcher' && typeof item.photoIndex === 'number') {
-        return;
-      }
-      item.photoIndex = totalPhotos > 0
-        ? Math.min(totalPhotos - 1, Math.floor(index * totalPhotos / Math.max(1, totalItems)))
-        : 0;
-    });
+        }
 
-    // Auto assign startNo and endNo to photos from items
+        if (matchedIndex !== -1) {
+          item.photoIndex = matchedIndex;
+          if (alternateIndex !== -1) {
+            item.alternatePhotoIndex = alternateIndex;
+          } else {
+            delete item.alternatePhotoIndex;
+          }
+        } else {
+          let closestIdx = 0;
+          let minDiff = Infinity;
+          state.photos.forEach((photo, pIdx) => {
+            if (Number.isFinite(photo.startNo) && Number.isFinite(photo.endNo)) {
+              const diff = Math.min(Math.abs(itemSeq - photo.startNo), Math.abs(itemSeq - photo.endNo));
+              if (diff < minDiff) {
+                minDiff = diff;
+                closestIdx = pIdx;
+              }
+            }
+          });
+          item.photoIndex = closestIdx;
+        }
+        item.mappingSource = 'estimated';
+        delete item.scrollAnchor;
+      });
+    } else {
+      const totalItems = state.receiptItems.length;
+      state.receiptItems.forEach((item, index) => {
+        if (item.mappingSource === 'matcher' || item.mappingSource === 'receipt-range') {
+          return;
+        }
+        item.photoIndex = totalPhotos > 0
+          ? Math.min(totalPhotos - 1, Math.floor(index * totalPhotos / Math.max(1, totalItems)))
+          : 0;
+        item.mappingSource = 'estimated';
+        delete item.scrollAnchor;
+      });
+    }
+  }
+
+  // 3. Auto assign startNo and endNo to photos from items if not configured
+  const hasConfiguredRanges = state.photos.some(p => Number.isFinite(p.startNo) && Number.isFinite(p.endNo));
+  if (!hasConfiguredRanges) {
     state.photos.forEach(p => { delete p.startNo; delete p.endNo; });
     state.receiptItems.forEach(item => {
       if (typeof item.photoIndex !== 'number') return;
@@ -1549,8 +2024,9 @@ async function trimHistory() {
 }
 
 function hasCurrentWork() {
-  return state.receiptItems.length > 0 || state.excelMap.size > 0 || state.photos.length > 0 ||
-    document.getElementById('trNumberInput').value.trim().length > 0;
+  const trInput = (typeof document !== 'undefined' && document.getElementById) ? document.getElementById('trNumberInput') : null;
+  const hasTr = trInput && typeof trInput.value === 'string' && trInput.value.trim().length > 0;
+  return state.receiptItems.length > 0 || state.excelMap.size > 0 || state.photos.length > 0 || Boolean(hasTr);
 }
 
 async function serializePhotosForStorage() {
@@ -2255,7 +2731,45 @@ function renderPageManageList() {
     </div>
   `;
 
-  container.innerHTML = matcherBannerHtml + state.photos.map((photo, idx) => {
+  // 1. Evaluate Safe Receipt Range Resolution Summary
+  const rangeResult = resolveReceiptRanges(state.photos, state.receiptItems);
+  const autoResolvedCount = rangeResult.resolvedCount;
+  const autoResolvedTracks = rangeResult.mappedTrackCount;
+  const reviewCount = rangeResult.needsReviewCount;
+
+  const rangeSummaryBannerHtml = `
+    <div class="p-3 bg-white border ${reviewCount > 0 ? 'border-amber-300 bg-amber-50/20' : (autoResolvedCount > 0 ? 'border-emerald-300 bg-emerald-50/20' : 'border-slate-200')} rounded-xl mb-3 shadow-xs" id="rangeResolutionSummaryBanner">
+      <div class="flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <i class="fa-solid ${reviewCount > 0 ? 'fa-triangle-exclamation text-amber-600' : (autoResolvedCount > 0 ? 'fa-circle-check text-emerald-600' : 'fa-list-check text-slate-500')} text-base"></i>
+            <h4 class="text-xs font-bold text-slate-800">
+              จับคู่อัตโนมัติแล้ว: <span class="text-emerald-700 font-bold">${autoResolvedCount} Sequence / ${autoResolvedTracks} Track</span>
+              ${reviewCount > 0 ? ` | <span class="text-amber-700 font-bold">ต้องตรวจสอบ: ${reviewCount} Sequence</span>` : ''}
+            </h4>
+          </div>
+          <div class="text-[11px] text-slate-600 mt-1">
+            ${reviewCount === 0 && autoResolvedCount > 0
+              ? '<span class="text-emerald-700 font-semibold"><i class="fa-solid fa-check"></i> พร้อมใช้งาน — คลิกรายการ Track เพื่อตรวจใบเสร็จ</span>'
+              : (reviewCount > 0
+                ? '<span class="text-amber-800 font-medium">⚠️ มีบางรายการต้องการการยืนยันหรือตรวจสอบข้อมูลเพิ่มเติม</span>'
+                : '<span class="text-slate-500">กด "🔍 อ่านรายการจากภาพ" บนหน้าใบเสร็จเพื่อตรวจจับและจับคู่พัสดุอัตโนมัติ</span>')}
+          </div>
+        </div>
+        ${reviewCount > 0 ? `
+          <div class="shrink-0 flex items-center gap-2">
+            <button type="button" id="btnFilterReviewOnly" class="btn-filter-review px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-2xs ${
+              state.filterReviewOnly ? 'bg-amber-600 text-white hover:bg-amber-700' : 'bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-200'
+            }">
+              <i class="fa-solid fa-filter text-[10px]"></i> ${state.filterReviewOnly ? 'แสดงทั้งหมด' : 'ตรวจเฉพาะรายการที่มีปัญหา'}
+            </button>
+          </div>
+        ` : ''}
+      </div>
+    </div>
+  `;
+
+  container.innerHTML = rangeSummaryBannerHtml + matcherBannerHtml + state.photos.map((photo, idx) => {
     const start = photo.startNo ?? '';
     const end = photo.endNo ?? '';
     const title = photo.label || `หน้า ${idx + 1}`;
@@ -2452,203 +2966,262 @@ function renderPageManageList() {
 
           ${(() => {
             const photoSuggestions = Array.isArray(photo.ocrSequenceSuggestions) ? photo.ocrSequenceSuggestions : [];
-            const pendingSuggestions = photoSuggestions.filter(s => s.status === 'pending');
-            if (pendingSuggestions.length === 0) return '';
+            const autoResolvedSuggestions = photoSuggestions.filter(s => (s.autoResolved || s.status === 'auto_resolved') && s.status !== 'rejected');
+            const pendingSuggestions = photoSuggestions.filter(s => !s.autoResolved && s.status !== 'auto_resolved' && s.status !== 'rejected');
 
-            return `
-              <div class="bg-amber-50/70 border border-amber-300 rounded-lg p-2.5 space-y-2 mb-2.5">
-                <div class="flex items-center justify-between">
-                  <div class="flex items-center gap-1.5">
-                    <i class="fa-solid fa-lightbulb text-amber-600 text-xs"></i>
-                    <span class="text-xs font-bold text-amber-900">ข้อเสนอแนะจาก OCR (รอการยืนยัน — ยังไม่บันทึก)</span>
-                    <span class="text-[10px] text-amber-800 bg-amber-200/80 px-1.5 py-0.5 rounded font-mono font-semibold">
-                      ${pendingSuggestions.length} รายการ
+            if (autoResolvedSuggestions.length === 0 && pendingSuggestions.length === 0) return '';
+
+            let autoResolvedHtml = '';
+            if (autoResolvedSuggestions.length > 0) {
+              autoResolvedHtml = `
+                <div class="bg-emerald-50/80 border border-emerald-300 rounded-lg p-2.5 space-y-2 mb-2.5">
+                  <div class="flex items-center justify-between gap-2 flex-wrap">
+                    <div class="flex items-center gap-1.5">
+                      <i class="fa-solid fa-circle-check text-emerald-600 text-xs"></i>
+                      <span class="text-xs font-bold text-emerald-900">จับคู่อัตโนมัติแล้ว (${autoResolvedSuggestions.length} Sequence)</span>
+                    </div>
+                    <span class="text-[10px] text-emerald-800 bg-emerald-200/80 px-1.5 py-0.5 rounded font-mono font-semibold">
+                      ไม่ต้องกดยืนยัน — ระบบจับคู่ให้ทันที
                     </span>
                   </div>
-                  <button type="button" class="btn-confirm-all-sug px-2 py-0.5 ${(() => {
-                    const readyCount = pendingSuggestions.filter(sug => {
-                      const isSingle = sug.firstTrack && (!sug.lastTrack || sug.lastTrack === sug.firstTrack);
-                      const hasQty = isSingle || (sug.qty !== null && sug.qty !== undefined && Number(sug.qty) > 0);
-                      const val = evaluateSequenceValidation({
-                        seqNo: sug.seqNo,
-                        firstTrack: sug.firstTrack,
-                        lastTrack: sug.lastTrack,
-                        qty: sug.qty
-                      }, photo.detectedRcpt, allSeqs);
-                      return val && val.status === 'strong' && sug.reviewCandidate?.status !== 'ambiguous' && Boolean(sug.firstTrack && hasQty);
-                    }).length;
-                    return readyCount > 0 ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-400 opacity-60';
-                  })()} text-white rounded text-[10px] font-semibold flex items-center gap-1 transition shadow-sm" data-page-index="${idx}">
-                    <i class="fa-solid fa-check-double text-[10px]"></i> ยืนยันรายการที่พร้อม (${pendingSuggestions.filter(sug => {
-                      const isSingle = sug.firstTrack && (!sug.lastTrack || sug.lastTrack === sug.firstTrack);
-                      const hasQty = isSingle || (sug.qty !== null && sug.qty !== undefined && Number(sug.qty) > 0);
-                      const val = evaluateSequenceValidation({
-                        seqNo: sug.seqNo,
-                        firstTrack: sug.firstTrack,
-                        lastTrack: sug.lastTrack,
-                        qty: sug.qty
-                      }, photo.detectedRcpt, allSeqs);
-                      return val && val.status === 'strong' && sug.reviewCandidate?.status !== 'ambiguous' && Boolean(sug.firstTrack && hasQty);
-                    }).length}/${pendingSuggestions.length})
-                  </button>
+                  <div class="space-y-1.5 pt-0.5">
+                    ${autoResolvedSuggestions.map(sug => {
+                      const displayLast = sug.resolvedLastTrack || sug.lastTrack;
+                      const isRange = sug.firstTrack !== displayLast;
+                      return `
+                        <div class="p-2 bg-white/95 border border-emerald-200 rounded-md text-xs flex items-center justify-between gap-2 flex-wrap sm:flex-nowrap shadow-2xs">
+                          <div class="flex items-center gap-2 min-w-0">
+                            <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 shrink-0 font-mono">
+                              ✓ จับคู่แล้ว ${sug.qty} รายการ
+                            </span>
+                            <div class="min-w-0">
+                              <div class="font-bold text-slate-800 text-xs flex items-center gap-1.5 flex-wrap">
+                                <span class="text-slate-600">เลขที่ ${sug.seqNo ?? '-'}:</span>
+                                <span class="font-mono text-emerald-700">${escapeHtml(sug.firstTrack)}</span>
+                                ${isRange ? `
+                                  <span class="text-slate-400">→</span>
+                                  <span class="font-mono text-emerald-700">${escapeHtml(displayLast)}</span>
+                                ` : ''}
+                              </div>
+                              ${sug.printedLastTrack && sug.printedLastTrack !== displayLast ? `
+                                <div class="text-[10px] text-slate-500 font-mono mt-0.5">
+                                  ปลายช่วงบนใบเสร็จ: ${escapeHtml(sug.printedLastTrack)}
+                                </div>
+                              ` : ''}
+                            </div>
+                          </div>
+                          <div class="shrink-0 flex items-center gap-2 text-[10px]">
+                            <span class="text-emerald-700 font-medium flex items-center gap-1">
+                              <i class="fa-solid fa-lock text-[9px]"></i> ปลอดภัย (Excel Verified)
+                            </span>
+                            <button type="button" class="btn-reject-sug text-slate-400 hover:text-rose-600 p-1 rounded transition" data-page-index="${idx}" data-sug-id="${sug.id}" title="ยกเลิกรายการนี้">
+                              <i class="fa-solid fa-trash-can text-xs"></i>
+                            </button>
+                          </div>
+                        </div>
+                      `;
+                    }).join('')}
+                  </div>
                 </div>
-                <div class="overflow-x-auto">
-                  <table class="w-full text-left text-xs bg-white rounded border border-amber-200">
-                    <thead>
-                      <tr class="text-[10px] font-semibold text-amber-900 border-b border-amber-200 bg-amber-100/50">
-                        <th class="p-1.5 text-center w-12">Seq#</th>
-                        <th class="p-1.5">First Track (แก้ไขได้)</th>
-                        <th class="p-1.5">Last Track (เว้นว่างถ้าเดี่ยว)</th>
-                        <th class="p-1.5 text-center w-14">Qty</th>
-                        <th class="p-1.5 text-center w-16">OCR Conf.</th>
-                        <th class="p-1.5">สถานะ Matcher</th>
-                        <th class="p-1.5 text-center w-28">การดำเนินการ</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${pendingSuggestions.map(sug => {
-                        const val = evaluateSequenceValidation({ seqNo: sug.seqNo, firstTrack: sug.firstTrack, lastTrack: sug.lastTrack, qty: sug.qty }, photo.detectedRcpt, allSeqs);
-                        const lTrackDisplay = (sug.firstTrack && sug.lastTrack && sug.firstTrack === sug.lastTrack) ? '' : (sug.lastTrack || '');
+              `;
+            }
+
+            let reviewHtml = '';
+            if (pendingSuggestions.length > 0) {
+              reviewHtml = `
+                <div class="bg-amber-50/70 border border-amber-300 rounded-lg p-2.5 space-y-2 mb-2.5">
+                  <div class="flex items-center justify-between">
+                    <div class="flex items-center gap-1.5">
+                      <i class="fa-solid fa-triangle-exclamation text-amber-600 text-xs"></i>
+                      <span class="text-xs font-bold text-amber-900">ข้อเสนอแนะที่ต้องตรวจสอบ (${pendingSuggestions.length} รายการ)</span>
+                    </div>
+                    <button type="button" class="btn-confirm-all-sug px-2 py-0.5 ${(() => {
+                      const readyCount = pendingSuggestions.filter(sug => {
                         const isSingle = sug.firstTrack && (!sug.lastTrack || sug.lastTrack === sug.firstTrack);
-                        return `
-                          <tr class="border-b border-amber-100 hover:bg-amber-50/40 transition" data-sug-row="${sug.id}">
-                            <td class="p-1 text-center">
-                              <input type="number" min="1" class="input-sug-seq w-12 px-1 py-1 text-xs border border-amber-300 rounded font-mono text-center bg-white"
-                                     value="${sug.seqNo ?? ''}" placeholder="Seq" data-page-index="${idx}" data-sug-id="${sug.id}">
-                            </td>
-                            <td class="p-1">
-                              <input type="text" class="input-sug-first w-full min-w-[125px] px-2 py-1 text-xs border border-amber-300 rounded font-mono uppercase bg-white"
-                                     value="${sug.firstTrack || ''}" placeholder="First Track" data-page-index="${idx}" data-sug-id="${sug.id}">
-                              ${sug.printedFirstTrack && sug.printedFirstTrack !== sug.firstTrack ? `
-                                <div class="mt-0.5 text-[9px] text-emerald-700 font-medium flex items-center gap-1">
-                                  <i class="fa-solid fa-check text-emerald-600"></i> ใช้เลขจาก Excel แล้ว
-                                  <span class="text-slate-400 font-mono">(เดิม: ${escapeHtml(sug.printedFirstTrack)})</span>
-                                </div>
-                              ` : ''}
-                              ${(() => {
-                                const cand = sug.reviewCandidate || findApiTrackCandidate(sug.firstTrack, state?.receiptItems || []);
-                                if (!cand) return '';
-                                if (cand.status === 'single_match') {
-                                  return `
-                                    <div class="mt-1 flex items-center justify-between gap-1 text-[10px] bg-blue-50 border border-blue-200 text-blue-900 px-1.5 py-0.5 rounded">
-                                      <span class="truncate" title="พบเลขพัสดุใกล้เคียงในระบบ Excel">อาจเป็น: <strong class="font-mono text-blue-700">${cand.candidate}</strong> (diff ${cand.distance})</span>
-                                      <button type="button" class="btn-use-candidate shrink-0 px-1.5 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[9px] font-medium transition shadow-2xs"
-                                              data-page-index="${idx}" data-sug-id="${sug.id}" data-candidate="${cand.candidate}" data-printed-first="${escapeHtml(sug.firstTrack)}">
-                                        ใช้เลขนี้
-                                      </button>
-                                    </div>
-                                  `;
-                                } else if (cand.status === 'ambiguous') {
-                                  return `
-                                    <div class="mt-1 text-[10px] bg-amber-50 border border-amber-200 text-amber-800 px-1.5 py-0.5 rounded truncate" title="${(cand.candidates || []).join(', ')}">
-                                      ⚠️ พบเลขใกล้เคียงหลายตัว (กำกวม) — แก้ไขเอง
-                                    </div>
-                                  `;
-                                } else if (cand.status === 'none' && val.status === 'conflict') {
-                                  return `
-                                    <div class="mt-1 text-[10px] text-slate-400 italic">
-                                      ไม่พบเลขใกล้เคียงใน Excel
-                                    </div>
-                                  `;
-                                }
-                                return '';
-                              })()}
-                            </td>
-                            <td class="p-1">
-                              <input type="text" class="input-sug-last w-full min-w-[125px] px-2 py-1 text-xs border border-amber-300 rounded font-mono uppercase bg-white"
-                                     value="${lTrackDisplay}" placeholder="เว้นว่างถ้าเดี่ยว" data-page-index="${idx}" data-sug-id="${sug.id}">
-                              ${sug.printedLastTrack && sug.printedLastTrack !== sug.lastTrack ? `
-                                <div class="mt-0.5 text-[9px] text-emerald-700 font-medium flex items-center gap-1">
-                                  <i class="fa-solid fa-check text-emerald-600"></i> ใช้เลขจาก Excel แล้ว
-                                  <span class="text-slate-400 font-mono">(เดิม: ${escapeHtml(sug.printedLastTrack)})</span>
-                                </div>
-                              ` : ''}
-                              ${(() => {
-                                if (val.status === 'conflict' && sug.firstTrack && sug.qty > 1) {
-                                  const rangeCand = findRangeReviewCandidate({ firstTrack: sug.firstTrack, lastTrack: sug.lastTrack, qty: sug.qty }, state?.receiptItems || [], allSeqs, idx);
-                                  if (rangeCand && rangeCand.status === 'candidate') {
+                        const hasQty = isSingle || (sug.qty !== null && sug.qty !== undefined && Number(sug.qty) > 0);
+                        const val = evaluateSequenceValidation({
+                          seqNo: sug.seqNo,
+                          firstTrack: sug.firstTrack,
+                          lastTrack: sug.lastTrack,
+                          qty: sug.qty
+                        }, photo.detectedRcpt, allSeqs);
+                        return val && val.status === 'strong' && sug.reviewCandidate?.status !== 'ambiguous' && Boolean(sug.firstTrack && hasQty);
+                      }).length;
+                      return readyCount > 0 ? 'bg-emerald-600 hover:bg-emerald-700' : 'bg-slate-400 opacity-60';
+                    })()} text-white rounded text-[10px] font-semibold flex items-center gap-1 transition shadow-sm" data-page-index="${idx}">
+                      <i class="fa-solid fa-check-double text-[10px]"></i> ยืนยันรายการที่พร้อม (${pendingSuggestions.filter(sug => {
+                        const isSingle = sug.firstTrack && (!sug.lastTrack || sug.lastTrack === sug.firstTrack);
+                        const hasQty = isSingle || (sug.qty !== null && sug.qty !== undefined && Number(sug.qty) > 0);
+                        const val = evaluateSequenceValidation({
+                          seqNo: sug.seqNo,
+                          firstTrack: sug.firstTrack,
+                          lastTrack: sug.lastTrack,
+                          qty: sug.qty
+                        }, photo.detectedRcpt, allSeqs);
+                        return val && val.status === 'strong' && sug.reviewCandidate?.status !== 'ambiguous' && Boolean(sug.firstTrack && hasQty);
+                      }).length}/${pendingSuggestions.length})
+                    </button>
+                  </div>
+                  <div class="overflow-x-auto">
+                    <table class="w-full text-left text-xs bg-white rounded border border-amber-200">
+                      <thead>
+                        <tr class="text-[10px] font-semibold text-amber-900 border-b border-amber-200 bg-amber-100/50">
+                          <th class="p-1.5 text-center w-12">Seq#</th>
+                          <th class="p-1.5">First Track (แก้ไขได้)</th>
+                          <th class="p-1.5">Last Track (เว้นว่างถ้าเดี่ยว)</th>
+                          <th class="p-1.5 text-center w-14">Qty</th>
+                          <th class="p-1.5 text-center w-16">OCR Conf.</th>
+                          <th class="p-1.5">สถานะ Matcher</th>
+                          <th class="p-1.5 text-center w-28">การดำเนินการ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${pendingSuggestions.map(sug => {
+                          const val = evaluateSequenceValidation({ seqNo: sug.seqNo, firstTrack: sug.firstTrack, lastTrack: sug.lastTrack, qty: sug.qty }, photo.detectedRcpt, allSeqs);
+                          const lTrackDisplay = (sug.firstTrack && sug.lastTrack && sug.firstTrack === sug.lastTrack) ? '' : (sug.lastTrack || '');
+                          const isSingle = sug.firstTrack && (!sug.lastTrack || sug.lastTrack === sug.firstTrack);
+                          return `
+                            <tr class="border-b border-amber-100 hover:bg-amber-50/40 transition" data-sug-row="${sug.id}">
+                              <td class="p-1 text-center">
+                                <input type="number" min="1" class="input-sug-seq w-12 px-1 py-1 text-xs border border-amber-300 rounded font-mono text-center bg-white"
+                                       value="${sug.seqNo ?? ''}" placeholder="Seq" data-page-index="${idx}" data-sug-id="${sug.id}">
+                              </td>
+                              <td class="p-1">
+                                <input type="text" class="input-sug-first w-full min-w-[125px] px-2 py-1 text-xs border border-amber-300 rounded font-mono uppercase bg-white"
+                                       value="${sug.firstTrack || ''}" placeholder="First Track" data-page-index="${idx}" data-sug-id="${sug.id}">
+                                ${sug.printedFirstTrack && sug.printedFirstTrack !== sug.firstTrack ? `
+                                  <div class="mt-0.5 text-[9px] text-emerald-700 font-medium flex items-center gap-1">
+                                    <i class="fa-solid fa-check text-emerald-600"></i> ใช้เลขจาก Excel แล้ว
+                                    <span class="text-slate-400 font-mono">(เดิม: ${escapeHtml(sug.printedFirstTrack)})</span>
+                                  </div>
+                                ` : ''}
+                                ${(() => {
+                                  const cand = sug.reviewCandidate || findApiTrackCandidate(sug.firstTrack, state?.receiptItems || []);
+                                  if (!cand) return '';
+                                  if (cand.status === 'single_match') {
                                     return `
-                                      <div class="mt-1 p-1.5 bg-amber-50/90 border border-amber-300 rounded text-[10px] text-amber-900 space-y-1">
-                                        <div class="flex items-center justify-between gap-1 flex-wrap">
-                                          <span class="font-semibold text-amber-800">
-                                            <i class="fa-solid fa-triangle-exclamation text-amber-600"></i> เลขปลายที่พิมพ์:
-                                            <span class="font-mono text-slate-700">${escapeHtml(sug.lastTrack)}</span>
-                                            <span class="text-rose-600 font-medium">(ไม่พบใน Tracking จริง)</span>
-                                          </span>
-                                          <span class="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-200 text-amber-900 border border-amber-300">
-                                            Candidate / ต้องตรวจสอบ
-                                          </span>
-                                        </div>
-                                        <div class="flex items-center justify-between gap-1 pt-0.5 border-t border-amber-200 flex-wrap">
-                                          <span class="truncate">
-                                            จากเลขเริ่มต้น + จำนวน ${sug.qty} ชิ้น → พบรายการจริงที่เป็นไปได้:
-                                            <strong class="font-mono text-blue-700 font-bold">${rangeCand.candidate}</strong>
-                                          </span>
-                                          <button type="button" class="btn-use-range-candidate shrink-0 px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-medium transition shadow-2xs"
-                                                  data-page-index="${idx}" data-sug-id="${sug.id}" data-candidate="${rangeCand.candidate}" data-printed-last="${escapeHtml(sug.lastTrack)}">
-                                            ใช้เลขนี้
-                                          </button>
-                                        </div>
-                                      </div>
-                                    `;
-                                  }
-                                }
-                                return '';
-                              })()}
-                            </td>
-                            <td class="p-1 text-center">
-                              <input type="number" min="1" class="input-sug-qty w-12 px-1 py-1 text-xs border ${!isSingle && (sug.qty === null || sug.qty === undefined || sug.qty === '') ? 'border-rose-400 bg-rose-50/80 font-bold text-rose-700' : 'border-amber-300'} rounded font-mono text-center bg-white"
-                                     value="${sug.qty !== null && sug.qty !== undefined ? sug.qty : (isSingle ? 1 : '')}"
-                                     placeholder="${isSingle ? '1' : 'Qty'}"
-                                     data-page-index="${idx}" data-sug-id="${sug.id}">
-                              ${(() => {
-                                if (!isSingle && (sug.qty === null || sug.qty === undefined || sug.qty === '')) {
-                                  const rangeReview = evaluateExcelRangeReview(sug, state?.receiptItems || []);
-                                  if (rangeReview && rangeReview.status === 'qty_suggested') {
-                                    return `
-                                      <div class="mt-1 p-1 bg-sky-50 border border-sky-300 rounded text-[9px] text-sky-900 text-center space-y-0.5">
-                                        <span class="block truncate">Excel: <strong>${rangeReview.expectedQty}</strong> ชิ้น</span>
-                                        <button type="button" class="btn-use-excel-qty w-full px-1 py-0.5 bg-sky-600 hover:bg-sky-700 text-white rounded text-[9px] font-semibold transition"
-                                                data-page-index="${idx}" data-sug-id="${sug.id}" data-qty="${rangeReview.expectedQty}">
-                                          ใช้ ${rangeReview.expectedQty}
+                                      <div class="mt-1 flex items-center justify-between gap-1 text-[10px] bg-blue-50 border border-blue-200 text-blue-900 px-1.5 py-0.5 rounded">
+                                        <span class="truncate" title="พบเลขพัสดุใกล้เคียงในระบบ Excel">อาจเป็น: <strong class="font-mono text-blue-700">${cand.candidate}</strong> (diff ${cand.distance})</span>
+                                        <button type="button" class="btn-use-candidate shrink-0 px-1.5 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[9px] font-medium transition shadow-2xs"
+                                                data-page-index="${idx}" data-sug-id="${sug.id}" data-candidate="${cand.candidate}" data-printed-first="${escapeHtml(sug.firstTrack)}">
+                                          ใช้เลขนี้
                                         </button>
                                       </div>
                                     `;
+                                  } else if (cand.status === 'ambiguous') {
+                                    return `
+                                      <div class="mt-1 text-[10px] bg-amber-50 border border-amber-200 text-amber-800 px-1.5 py-0.5 rounded truncate" title="${(cand.candidates || []).join(', ')}">
+                                        ⚠️ พบเลขใกล้เคียงหลายตัว (กำกวม) — แก้ไขเอง
+                                      </div>
+                                    `;
+                                  } else if (cand.status === 'none' && val.status === 'conflict') {
+                                    return `
+                                      <div class="mt-1 text-[10px] text-slate-400 italic">
+                                        ไม่พบเลขใกล้เคียงใน Excel
+                                      </div>
+                                    `;
                                   }
-                                }
-                                return '';
-                              })()}
-                            </td>
-                            <td class="p-1 text-center">
-                              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 text-slate-700 border border-slate-300">
-                                ${sug.confidence}%
-                              </span>
-                            </td>
-                            <td class="p-1">
-                              <span class="sug-matcher-badge inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border ${val.badgeClass} w-max" title="${escapeHtml(val.reasonText)}" data-page-index="${idx}" data-sug-id="${sug.id}">
-                                ${val.badge}
-                              </span>
-                            </td>
-                            <td class="p-1 text-center">
-                              <div class="flex items-center justify-center gap-1">
-                                <button type="button" class="btn-confirm-sug px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-semibold transition"
-                                        data-page-index="${idx}" data-sug-id="${sug.id}" title="ยืนยันนำเข้ารายการนี้">
-                                  <i class="fa-solid fa-check"></i> ยืนยัน
-                                </button>
-                                <button type="button" class="btn-reject-sug px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[10px] transition"
-                                        data-page-index="${idx}" data-sug-id="${sug.id}" title="ไม่ใช้">
-                                  <i class="fa-solid fa-xmark"></i>
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        `;
-                      }).join('')}
-                    </tbody>
-                  </table>
+                                  return '';
+                                })()}
+                              </td>
+                              <td class="p-1">
+                                <input type="text" class="input-sug-last w-full min-w-[125px] px-2 py-1 text-xs border border-amber-300 rounded font-mono uppercase bg-white"
+                                       value="${lTrackDisplay}" placeholder="เว้นว่างถ้าเดี่ยว" data-page-index="${idx}" data-sug-id="${sug.id}">
+                                ${sug.printedLastTrack && sug.printedLastTrack !== sug.lastTrack ? `
+                                  <div class="mt-0.5 text-[9px] text-emerald-700 font-medium flex items-center gap-1">
+                                    <i class="fa-solid fa-check text-emerald-600"></i> ใช้เลขจาก Excel แล้ว
+                                    <span class="text-slate-400 font-mono">(เดิม: ${escapeHtml(sug.printedLastTrack)})</span>
+                                  </div>
+                                ` : ''}
+                                ${(() => {
+                                  if (val.status === 'conflict' && sug.firstTrack && sug.qty > 1) {
+                                    const rangeCand = findRangeReviewCandidate({ firstTrack: sug.firstTrack, lastTrack: sug.lastTrack, qty: sug.qty }, state?.receiptItems || [], allSeqs, idx);
+                                    if (rangeCand && rangeCand.status === 'candidate') {
+                                      return `
+                                        <div class="mt-1 p-1.5 bg-amber-50/90 border border-amber-300 rounded text-[10px] text-amber-900 space-y-1">
+                                          <div class="flex items-center justify-between gap-1 flex-wrap">
+                                            <span class="font-semibold text-amber-800">
+                                              <i class="fa-solid fa-triangle-exclamation text-amber-600"></i> เลขปลายที่พิมพ์:
+                                              <span class="font-mono text-slate-700">${escapeHtml(sug.lastTrack)}</span>
+                                              <span class="text-rose-600 font-medium">(ไม่พบใน Tracking จริง)</span>
+                                            </span>
+                                            <span class="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-200 text-amber-900 border border-amber-300">
+                                              Candidate / ต้องตรวจสอบ
+                                            </span>
+                                          </div>
+                                          <div class="flex items-center justify-between gap-1 pt-0.5 border-t border-amber-200 flex-wrap">
+                                            <span class="truncate">
+                                              จากเลขเริ่มต้น + จำนวน ${sug.qty} ชิ้น → พบรายการจริงที่เป็นไปได้:
+                                              <strong class="font-mono text-blue-700 font-bold">${rangeCand.candidate}</strong>
+                                            </span>
+                                            <button type="button" class="btn-use-range-candidate shrink-0 px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-medium transition shadow-2xs"
+                                                    data-page-index="${idx}" data-sug-id="${sug.id}" data-candidate="${rangeCand.candidate}" data-printed-last="${escapeHtml(sug.lastTrack)}">
+                                              ใช้เลขนี้
+                                            </button>
+                                          </div>
+                                        </div>
+                                      `;
+                                    }
+                                  }
+                                  return '';
+                                })()}
+                              </td>
+                              <td class="p-1 text-center">
+                                <input type="number" min="1" class="input-sug-qty w-12 px-1 py-1 text-xs border ${!isSingle && (sug.qty === null || sug.qty === undefined || sug.qty === '') ? 'border-rose-400 bg-rose-50/80 font-bold text-rose-700' : 'border-amber-300'} rounded font-mono text-center bg-white"
+                                       value="${sug.qty !== null && sug.qty !== undefined ? sug.qty : (isSingle ? 1 : '')}"
+                                       placeholder="${isSingle ? '1' : 'Qty'}"
+                                       data-page-index="${idx}" data-sug-id="${sug.id}">
+                                ${(() => {
+                                  if (!isSingle && (sug.qty === null || sug.qty === undefined || sug.qty === '')) {
+                                    const rangeReview = evaluateExcelRangeReview(sug, state?.receiptItems || []);
+                                    if (rangeReview && rangeReview.status === 'qty_suggested') {
+                                      return `
+                                        <div class="mt-1 p-1 bg-sky-50 border border-sky-300 rounded text-[9px] text-sky-900 text-center space-y-0.5">
+                                          <span class="block truncate">Excel: <strong>${rangeReview.expectedQty}</strong> ชิ้น</span>
+                                          <button type="button" class="btn-use-excel-qty w-full px-1 py-0.5 bg-sky-600 hover:bg-sky-700 text-white rounded text-[9px] font-semibold transition"
+                                                  data-page-index="${idx}" data-sug-id="${sug.id}" data-qty="${rangeReview.expectedQty}">
+                                            ใช้ ${rangeReview.expectedQty}
+                                          </button>
+                                        </div>
+                                      `;
+                                    }
+                                  }
+                                  return '';
+                                })()}
+                              </td>
+                              <td class="p-1 text-center">
+                                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 text-slate-700 border border-slate-300">
+                                  ${sug.confidence}%
+                                </span>
+                              </td>
+                              <td class="p-1">
+                                <span class="sug-matcher-badge inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border ${val.badgeClass} w-max" title="${escapeHtml(val.reasonText)}" data-page-index="${idx}" data-sug-id="${sug.id}">
+                                  ${val.badge}
+                                </span>
+                              </td>
+                              <td class="p-1 text-center">
+                                <div class="flex items-center justify-center gap-1">
+                                  <button type="button" class="btn-confirm-sug px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-semibold transition"
+                                          data-page-index="${idx}" data-sug-id="${sug.id}" title="ยืนยันนำเข้ารายการนี้">
+                                    <i class="fa-solid fa-check"></i> ยืนยัน
+                                  </button>
+                                  <button type="button" class="btn-reject-sug px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[10px] transition"
+                                          data-page-index="${idx}" data-sug-id="${sug.id}" title="ไม่ใช้">
+                                    <i class="fa-solid fa-xmark"></i>
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          `;
+                        }).join('')}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
-            `;
+              `;
+            }
+
+            return autoResolvedHtml + reviewHtml;
           })()}
 
           ${seqRowsHtml}
@@ -2963,6 +3536,15 @@ function renderPageManageList() {
       }
     };
   }
+
+  // Handle Filter Review Only button
+  const filterBtn = container.querySelector('#btnFilterReviewOnly');
+  if (filterBtn) {
+    filterBtn.onclick = () => {
+      state.filterReviewOnly = !state.filterReviewOnly;
+      renderPageManageList();
+    };
+  }
 }
 
 function showEmptyPhotoState() {
@@ -3005,6 +3587,7 @@ function startNewSession() {
   state.lastPreApplySnapshot = null;
   state.trackSource = null;
   state.apiFeedback = null;
+  state.filterReviewOnly = false;
 
   if (typeof localStorage !== 'undefined') {
     localStorage.removeItem('thp_latest_cropped_receipt');
@@ -4240,7 +4823,8 @@ function buildMatcherApplyPlan(photos, receiptItems) {
                 rcptNo: sRcpt,
                 seqNo: sSeqNo,
                 trackNo: apiTracks[apiIdx],
-                confidence: matcher.MATCH_CONFIDENCE.STRONG
+                confidence: matcher.MATCH_CONFIDENCE.STRONG,
+                scrollAnchor: getSequenceScrollAnchor(seq, sIdx, sequences.length)
               };
             }
           });
@@ -4333,6 +4917,9 @@ function applyMatcherMapping({ targetState = null, dryRun = false } = {}) {
         s.receiptItems[apiIdx].receiptSeqNo = m.seqNo;
         s.receiptItems[apiIdx].rcptNo = m.rcptNo;
         s.receiptItems[apiIdx].mappingSource = 'matcher';
+        if (typeof m.scrollAnchor === 'number' && Number.isFinite(m.scrollAnchor)) {
+          s.receiptItems[apiIdx].scrollAnchor = m.scrollAnchor;
+        }
       }
     });
 
@@ -4478,6 +5065,8 @@ if (typeof window !== 'undefined') {
   window.startNewSession = startNewSession;
   window.autoRestoreLatestSession = autoRestoreLatestSession;
   window.alignReceiptItemsToPhotos = alignReceiptItemsToPhotos;
+  window.resolveReceiptRanges = resolveReceiptRanges;
+  window.getSequenceScrollAnchor = getSequenceScrollAnchor;
   window.renderItems = renderItems;
   window.handleExcelUpload = handleExcelUpload;
 }
@@ -4516,6 +5105,8 @@ if (typeof module !== 'undefined' && module.exports) {
     startNewSession,
     autoRestoreLatestSession,
     alignReceiptItemsToPhotos,
+    resolveReceiptRanges,
+    getSequenceScrollAnchor,
     renderItems,
     handleExcelUpload
   };
@@ -5222,17 +5813,29 @@ function selectItem(item, scrollPhotoIntoPosition = true) {
   if (scrollPhotoIntoPosition && isValidPhoto && typeof document !== 'undefined') {
     const leftContainer = document.getElementById('receiptContainer');
     if (leftContainer) {
-      const photoMeta = state.photos[item.photoIndex];
-      if (photoMeta && Number.isFinite(photoMeta.startNo) && Number.isFinite(photoMeta.endNo) && photoMeta.endNo >= photoMeta.startNo) {
-        const pageCount = photoMeta.endNo - photoMeta.startNo + 1;
-        const indexInPage = item.no - photoMeta.startNo;
-        const ratio = Math.max(0, Math.min(1, indexInPage / pageCount));
-        const maxScroll = Math.max(0, leftContainer.scrollHeight - leftContainer.clientHeight);
-        const targetScroll = maxScroll * ratio;
+      const maxScroll = Math.max(0, leftContainer.scrollHeight - leftContainer.clientHeight);
+
+      if (typeof item.scrollAnchor === 'number' && Number.isFinite(item.scrollAnchor)) {
+        // Sequence Anchor: All members of this sequence scroll to the exact same visual anchor
+        const targetScroll = Math.max(0, Math.min(maxScroll, Math.round(maxScroll * item.scrollAnchor)));
         if (typeof leftContainer.scrollTo === 'function') {
           leftContainer.scrollTo({ top: targetScroll, behavior: 'smooth' });
         } else {
           leftContainer.scrollTop = targetScroll;
+        }
+      } else {
+        // Fallback: Legacy proportional distribution within photo page range
+        const photoMeta = state.photos[item.photoIndex];
+        if (photoMeta && Number.isFinite(photoMeta.startNo) && Number.isFinite(photoMeta.endNo) && photoMeta.endNo >= photoMeta.startNo) {
+          const pageCount = photoMeta.endNo - photoMeta.startNo + 1;
+          const indexInPage = item.no - photoMeta.startNo;
+          const ratio = Math.max(0, Math.min(1, indexInPage / pageCount));
+          const targetScroll = maxScroll * ratio;
+          if (typeof leftContainer.scrollTo === 'function') {
+            leftContainer.scrollTo({ top: targetScroll, behavior: 'smooth' });
+          } else {
+            leftContainer.scrollTop = targetScroll;
+          }
         }
       }
     }
