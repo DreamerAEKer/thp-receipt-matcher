@@ -525,6 +525,340 @@ async function processPhotoHeaderIdentity(photo) {
 }
 
 /**
+ * Preprocesses line items region for OCR
+ * When hasHeader is true, skips top ~22% header; else starts at ~2%.
+ * Ends at ~98%.
+ */
+function preprocessLinesForOcr(imageSource, hasHeader = true) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const origW = img.naturalWidth || img.width;
+        const origH = img.naturalHeight || img.height;
+
+        const startYRatio = hasHeader ? 0.22 : 0.02;
+        const endYRatio = 0.98;
+
+        const cropY = Math.round(origH * startYRatio);
+        const cropH = Math.round(origH * (endYRatio - startYRatio));
+        const cropW = origW;
+
+        const scale = Math.min(1.5, 1400 / cropW);
+        const targetW = Math.round(cropW * scale);
+        const targetH = Math.round(cropH * scale);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+
+        ctx.drawImage(img, 0, cropY, cropW, cropH, 0, 0, targetW, targetH);
+
+        const imgData = ctx.getImageData(0, 0, targetW, targetH);
+        const d = imgData.data;
+        const contrast = 1.35;
+        const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
+
+        for (let i = 0; i < d.length; i += 4) {
+          const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          const val = factor * (gray - 128) + 128;
+          const clamped = Math.max(0, Math.min(255, val));
+          d[i] = clamped;
+          d[i + 1] = clamped;
+          d[i + 2] = clamped;
+        }
+        ctx.putImageData(imgData, 0, 0);
+
+        resolve(canvas.toDataURL('image/jpeg', 0.88));
+      } catch (err) {
+        reject(err);
+      }
+    };
+    img.onerror = () => reject(new Error('โหลดภาพเพื่อทำ Line OCR ไม่สำเร็จ'));
+    img.src = typeof imageSource === 'string' ? imageSource : URL.createObjectURL(imageSource);
+  });
+}
+
+/**
+ * Extracts tracking number candidates from text.
+ * Strictly normalizes whitespace and case ONLY.
+ * NO auto-correction of characters (O->0, I->1, 7H->TH etc.).
+ */
+function extractTrackCandidates(text) {
+  const candidates = [];
+  if (!text || typeof text !== 'string') return candidates;
+  const regex = /(?:^|[\s,;:])([A-Za-z0-9]{2})\s*([0-9\s]{8,14})\s*([A-Za-z0-9]{2})(?=$|[\s,;:.!?])/g;
+  let m;
+  while ((m = regex.exec(text)) !== null) {
+    const prefix = m[1];
+    const middleDigits = m[2].replace(/\s+/g, '');
+    const suffix = m[3];
+    if (middleDigits.length >= 8 && middleDigits.length <= 10) {
+      const full = cleanTrackNo(prefix + middleDigits + suffix);
+      candidates.push({
+        raw: m[0].trim(),
+        normalized: full
+      });
+    }
+  }
+  return candidates;
+}
+
+/**
+ * Standard Levenshtein edit distance computation for candidate suggestion.
+ */
+function levenshteinDistance(a, b) {
+  if (a === b) return 0;
+  if (!a) return b ? b.length : 0;
+  if (!b) return a.length;
+  const m = a.length, n = b.length;
+  const d = Array.from({ length: m + 1 }, () => new Array(n + 1));
+  for (let i = 0; i <= m; i++) d[i][0] = i;
+  for (let j = 0; j <= n; j++) d[0][j] = j;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+    }
+  }
+  return d[m][n];
+}
+
+/**
+ * Searches current API array for reference tracking candidate.
+ * Strictly SUGGESTION ONLY — NEVER AUTO-CORRECT OR AUTO-APPLY.
+ * Ambiguous matches return status 'ambiguous'.
+ */
+function findApiTrackCandidate(rawTrack, apiItems, maxDistance = 3) {
+  if (!rawTrack || typeof rawTrack !== 'string') {
+    return { status: 'none', candidate: null, distance: null, source: 'api-review' };
+  }
+  const norm = cleanTrackNo(rawTrack);
+  if (!norm) return { status: 'none', candidate: null, distance: null, source: 'api-review' };
+
+  const uniqueApiTracks = new Set();
+  (apiItems || []).forEach(item => {
+    const b = cleanTrackNo(item?.barcode || item?.track_no || item?.trackNo || (typeof item === 'string' ? item : ''));
+    if (b) uniqueApiTracks.add(b);
+  });
+
+  if (uniqueApiTracks.has(norm)) {
+    return { status: 'exact_match', candidate: norm, distance: 0, source: 'api-review' };
+  }
+
+  const matches = [];
+  uniqueApiTracks.forEach(apiTrack => {
+    const dist = levenshteinDistance(norm, apiTrack);
+    if (dist <= maxDistance) {
+      matches.push({ track: apiTrack, distance: dist });
+    }
+  });
+
+  if (matches.length === 0) {
+    return { status: 'none', candidate: null, distance: null, source: 'api-review' };
+  }
+
+  matches.sort((a, b) => a.distance - b.distance);
+  const bestDist = matches[0].distance;
+  const bestMatches = matches.filter(m => m.distance === bestDist);
+
+  if (bestMatches.length === 1) {
+    return {
+      status: 'single_match',
+      candidate: bestMatches[0].track,
+      distance: bestDist,
+      source: 'api-review'
+    };
+  }
+
+  return {
+    status: 'ambiguous',
+    candidate: null,
+    candidates: bestMatches.map(m => m.track),
+    distance: bestDist,
+    source: 'api-review'
+  };
+}
+
+/**
+ * Parses line items from OCR lines and returns non-binding suggestion objects.
+ * Never modifies photo.sequences directly.
+ */
+function parseReceiptLineEvidence(lines, rcptNo = null, apiItems = []) {
+  const suggestions = [];
+  if (!Array.isArray(lines)) return suggestions;
+
+  let currentSeq = null;
+  let currentRaw = '';
+  let currentConf = 0;
+  let confCount = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const text = (line.text || '').trim();
+    if (!text) continue;
+
+    const seqMatch = text.match(/^\s*(\d{1,4})\s*[\.\,\:\;\-]\s*(.*)$/);
+    if (seqMatch) {
+      currentSeq = parseInt(seqMatch[1], 10);
+      currentRaw = text;
+      currentConf = line.confidence || 0;
+      confCount = 1;
+    } else if (currentSeq !== null && confCount < 3) {
+      currentRaw += ' ' + text;
+      currentConf += (line.confidence || 0);
+      confCount++;
+    }
+
+    const tracks = extractTrackCandidates(text);
+    if (tracks.length > 0) {
+      const first = tracks[0].normalized;
+      const last = tracks.length > 1 ? tracks[1].normalized : first;
+      // Rule 8: Range without printed qty keeps qty null (never fabricate qty)
+      let qty = tracks.length > 1 ? null : 1;
+
+      const qtyMatch = text.match(/(?:จำนวน\s*(\d+)|(\d+)\s*ชิ้น|qty\s*[:\.]?\s*(\d+))/i);
+      if (qtyMatch) {
+        const q = parseInt(qtyMatch[1] || qtyMatch[2] || qtyMatch[3], 10);
+        if (!isNaN(q) && q > 0) qty = q;
+      }
+
+      const avgConf = confCount > 0 ? Math.round(currentConf / confCount) : Math.round(line.confidence || 0);
+      const candidateInfo = findApiTrackCandidate(first, apiItems);
+
+      suggestions.push({
+        id: 'sug_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+        rcptNo: rcptNo || null,
+        seqNo: currentSeq !== null ? currentSeq : null,
+        firstTrack: first,
+        lastTrack: last,
+        qty: qty,
+        rawText: currentRaw || text,
+        confidence: avgConf,
+        provenance: 'ocr',
+        status: 'pending',
+        reviewCandidate: candidateInfo
+      });
+
+      currentSeq = null;
+      currentRaw = '';
+      confCount = 0;
+    }
+  }
+
+  return suggestions;
+}
+
+/**
+ * Executes Line OCR on a specific photo in Page Manager.
+ * Stores suggestions in photo.ocrSequenceSuggestions without mutating photo.sequences.
+ */
+async function scanPhotoLineEvidence(photoIndex) {
+  const photo = state.photos[photoIndex];
+  if (!photo) return;
+
+  photo.ocrLinesStatus = 'processing';
+  renderPageManageList();
+
+  try {
+    const hasHeader = Boolean(photo.detectedTR || photo.detectedRcpt || photo.isHeaderPage);
+    const preprocessedUrl = await preprocessLinesForOcr(photo.file, hasHeader);
+    const worker = await getOcrWorker();
+    const { data } = await worker.recognize(preprocessedUrl);
+
+    const rcptNo = photo.detectedRcpt || null;
+    const lines = (data.lines || []).map(l => ({ text: l.text, confidence: l.confidence }));
+    const suggestions = parseReceiptLineEvidence(lines, rcptNo, state?.receiptItems || []);
+
+    photo.ocrSequenceSuggestions = suggestions;
+    photo.ocrLinesStatus = 'done';
+    photo.ocrLinesConfidence = data.confidence || 0;
+  } catch (err) {
+    console.warn('OCR Line extraction error:', err);
+    photo.ocrLinesStatus = 'error';
+    photo.ocrLinesError = err.message;
+  } finally {
+    renderPageManageList();
+  }
+}
+
+/**
+ * Explicit user confirmation of an OCR suggestion.
+ * Copies verified/edited values into photo.sequences with provenance: 'manual'.
+ */
+function confirmOcrSuggestion(photoIndex, suggestionId, editedValues = null) {
+  const photo = state.photos[photoIndex];
+  if (!photo || !Array.isArray(photo.ocrSequenceSuggestions)) return;
+
+  const sug = photo.ocrSequenceSuggestions.find(s => s.id === suggestionId);
+  if (!sug) return;
+
+  if (!Array.isArray(photo.sequences)) {
+    photo.sequences = [];
+  }
+
+  const finalSeqNo = (editedValues && editedValues.seqNo !== undefined) ? (Number(editedValues.seqNo) || null) : sug.seqNo;
+  const finalFirst = (editedValues && editedValues.firstTrack !== undefined) ? cleanTrackNo(editedValues.firstTrack) : sug.firstTrack;
+  let finalLast = (editedValues && editedValues.lastTrack !== undefined) ? cleanTrackNo(editedValues.lastTrack) : sug.lastTrack;
+  let finalQty = (editedValues && editedValues.qty !== undefined) ? (Number(editedValues.qty) || 1) : sug.qty;
+
+  if (finalFirst && (!finalLast || finalLast === finalFirst)) {
+    finalLast = finalFirst;
+    if (!finalQty) finalQty = 1;
+  }
+
+  photo.sequences.push({
+    rcptNo: (editedValues && editedValues.rcptNo !== undefined) ? editedValues.rcptNo : (sug.rcptNo || photo.detectedRcpt || null),
+    seqNo: finalSeqNo,
+    firstTrack: finalFirst,
+    lastTrack: finalLast,
+    qty: finalQty,
+    provenance: 'manual',
+    fieldSources: {
+      rcptNo: 'manual',
+      seqNo: 'manual',
+      firstTrack: 'manual',
+      lastTrack: 'manual',
+      qty: 'manual'
+    },
+    ocrRawText: sug.rawText,
+    ocrConfidence: sug.confidence
+  });
+
+  sug.status = 'confirmed';
+  renderPageManageList();
+}
+
+/**
+ * Rejects an OCR suggestion without adding it to photo.sequences.
+ */
+function rejectOcrSuggestion(photoIndex, suggestionId) {
+  const photo = state.photos[photoIndex];
+  if (!photo || !Array.isArray(photo.ocrSequenceSuggestions)) return;
+
+  const sug = photo.ocrSequenceSuggestions.find(s => s.id === suggestionId);
+  if (sug) {
+    sug.status = 'rejected';
+  }
+  renderPageManageList();
+}
+
+/**
+ * Batch confirmation of all pending suggestions for a photo.
+ */
+function confirmAllOcrSuggestions(photoIndex) {
+  const photo = state.photos[photoIndex];
+  if (!photo || !Array.isArray(photo.ocrSequenceSuggestions)) return;
+
+  const pending = photo.ocrSequenceSuggestions.filter(s => s.status === 'pending');
+  pending.forEach(sug => {
+    confirmOcrSuggestion(photoIndex, sug.id);
+  });
+}
+
+/**
  * Validates a photo's detected TR against the current working TR
  */
 function validatePhotoTRIdentity(photo) {
@@ -974,6 +1308,9 @@ function hydratePhotos(photos) {
     }
     if (!Array.isArray(hydrated.sequences)) {
       hydrated.sequences = [];
+    }
+    if (!Array.isArray(hydrated.ocrSequenceSuggestions)) {
+      hydrated.ocrSequenceSuggestions = [];
     }
     return hydrated;
   });
@@ -1687,16 +2024,143 @@ function renderPageManageList() {
         </div>
 
         <div class="bg-white border border-slate-200/80 rounded-lg p-2.5">
-          <div class="flex items-center justify-between mb-2">
+          <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
             <div class="flex items-center gap-1.5">
               <i class="fa-solid fa-list-ol text-blue-600 text-xs"></i>
               <span class="text-xs font-bold text-slate-700">หลักฐาน Sequence บนกระดาษ (Receipt Sequences)</span>
               <span class="text-[10px] text-slate-400">(${photoSequences.length} รายการ)</span>
             </div>
-            <button type="button" class="btn-add-sequence px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded text-[11px] font-semibold flex items-center gap-1 transition" data-page-index="${idx}">
-              <i class="fa-solid fa-plus text-[10px]"></i> เพิ่ม Sequence
-            </button>
+            <div class="flex items-center gap-1.5">
+              <button type="button" class="btn-scan-lines px-2 py-0.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded text-[11px] font-semibold flex items-center gap-1 transition" data-page-index="${idx}" title="อ่านรายการพัสดุจากภาพด้วย OCR">
+                <i class="fa-solid fa-wand-magic-sparkles text-[10px]"></i> 🔍 อ่านรายการจากภาพ
+              </button>
+              <button type="button" class="btn-add-sequence px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded text-[11px] font-semibold flex items-center gap-1 transition" data-page-index="${idx}">
+                <i class="fa-solid fa-plus text-[10px]"></i> เพิ่ม Sequence
+              </button>
+            </div>
           </div>
+
+          ${photo.ocrLinesStatus === 'processing' ? `
+            <div class="bg-amber-50 border border-amber-200 rounded-lg p-2.5 flex items-center gap-2 text-xs text-amber-800 my-2">
+              <i class="fa-solid fa-spinner fa-spin text-amber-600"></i>
+              <span>กำลังอ่านรายการพัสดุจากภาพด้วย OCR... กรุณารอสักครู่</span>
+            </div>
+          ` : ''}
+
+          ${(() => {
+            const photoSuggestions = Array.isArray(photo.ocrSequenceSuggestions) ? photo.ocrSequenceSuggestions : [];
+            const pendingSuggestions = photoSuggestions.filter(s => s.status === 'pending');
+            if (pendingSuggestions.length === 0) return '';
+
+            return `
+              <div class="bg-amber-50/70 border border-amber-300 rounded-lg p-2.5 space-y-2 mb-2.5">
+                <div class="flex items-center justify-between">
+                  <div class="flex items-center gap-1.5">
+                    <i class="fa-solid fa-lightbulb text-amber-600 text-xs"></i>
+                    <span class="text-xs font-bold text-amber-900">ข้อเสนอแนะจาก OCR (รอการยืนยัน — ยังไม่บันทึก)</span>
+                    <span class="text-[10px] text-amber-800 bg-amber-200/80 px-1.5 py-0.5 rounded font-mono font-semibold">
+                      ${pendingSuggestions.length} รายการ
+                    </span>
+                  </div>
+                  <button type="button" class="btn-confirm-all-sug px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-semibold flex items-center gap-1 transition shadow-sm" data-page-index="${idx}">
+                    <i class="fa-solid fa-check-double text-[10px]"></i> ยืนยันทั้งหมด (${pendingSuggestions.length})
+                  </button>
+                </div>
+                <div class="overflow-x-auto">
+                  <table class="w-full text-left text-xs bg-white rounded border border-amber-200">
+                    <thead>
+                      <tr class="text-[10px] font-semibold text-amber-900 border-b border-amber-200 bg-amber-100/50">
+                        <th class="p-1.5 text-center w-12">Seq#</th>
+                        <th class="p-1.5">First Track (แก้ไขได้)</th>
+                        <th class="p-1.5">Last Track (เว้นว่างถ้าเดี่ยว)</th>
+                        <th class="p-1.5 text-center w-12">Qty</th>
+                        <th class="p-1.5 text-center w-16">OCR Conf.</th>
+                        <th class="p-1.5">สถานะ Matcher</th>
+                        <th class="p-1.5 text-center w-28">การดำเนินการ</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${pendingSuggestions.map(sug => {
+                        const val = evaluateSequenceValidation({ seqNo: sug.seqNo, firstTrack: sug.firstTrack, lastTrack: sug.lastTrack, qty: sug.qty }, photo.detectedRcpt, allSeqs);
+                        const lTrackDisplay = (sug.firstTrack && sug.lastTrack && sug.firstTrack === sug.lastTrack) ? '' : (sug.lastTrack || '');
+                        return `
+                          <tr class="border-b border-amber-100 hover:bg-amber-50/40 transition" data-sug-row="${sug.id}">
+                            <td class="p-1 text-center">
+                              <input type="number" min="1" class="input-sug-seq w-12 px-1 py-1 text-xs border border-amber-300 rounded font-mono text-center bg-white"
+                                     value="${sug.seqNo ?? ''}" placeholder="Seq" data-page-index="${idx}" data-sug-id="${sug.id}">
+                            </td>
+                            <td class="p-1">
+                              <input type="text" class="input-sug-first w-full min-w-[125px] px-2 py-1 text-xs border border-amber-300 rounded font-mono uppercase bg-white"
+                                     value="${sug.firstTrack || ''}" placeholder="First Track" data-page-index="${idx}" data-sug-id="${sug.id}">
+                              ${(() => {
+                                const cand = sug.reviewCandidate || findApiTrackCandidate(sug.firstTrack, state?.receiptItems || []);
+                                if (!cand) return '';
+                                if (cand.status === 'single_match') {
+                                  return `
+                                    <div class="mt-1 flex items-center justify-between gap-1 text-[10px] bg-blue-50 border border-blue-200 text-blue-900 px-1.5 py-0.5 rounded">
+                                      <span class="truncate" title="พบเลขพัสดุใกล้เคียงในระบบ API">อาจเป็น: <strong class="font-mono text-blue-700">${cand.candidate}</strong> (diff ${cand.distance})</span>
+                                      <button type="button" class="btn-use-candidate shrink-0 px-1.5 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[9px] font-medium transition shadow-2xs"
+                                              data-page-index="${idx}" data-sug-id="${sug.id}" data-candidate="${cand.candidate}">
+                                        ใช้เลขนี้
+                                      </button>
+                                    </div>
+                                  `;
+                                } else if (cand.status === 'ambiguous') {
+                                  return `
+                                    <div class="mt-1 text-[10px] bg-amber-50 border border-amber-200 text-amber-800 px-1.5 py-0.5 rounded truncate" title="${(cand.candidates || []).join(', ')}">
+                                      ⚠️ พบเลขใกล้เคียงหลายตัว (กำกวม) — แก้ไขเอง
+                                    </div>
+                                  `;
+                                } else if (cand.status === 'none' && val.status === 'conflict') {
+                                  return `
+                                    <div class="mt-1 text-[10px] text-slate-400 italic">
+                                      ไม่พบเลขใกล้เคียงใน API
+                                    </div>
+                                  `;
+                                }
+                                return '';
+                              })()}
+                            </td>
+                            <td class="p-1">
+                              <input type="text" class="input-sug-last w-full min-w-[125px] px-2 py-1 text-xs border border-amber-300 rounded font-mono uppercase bg-white"
+                                     value="${lTrackDisplay}" placeholder="เว้นว่างถ้าเดี่ยว" data-page-index="${idx}" data-sug-id="${sug.id}">
+                            </td>
+                            <td class="p-1 text-center">
+                              <input type="number" min="1" class="input-sug-qty w-12 px-1 py-1 text-xs border border-amber-300 rounded font-mono text-center bg-white"
+                                     value="${sug.qty ?? 1}" placeholder="Qty" data-page-index="${idx}" data-sug-id="${sug.id}">
+                            </td>
+                            <td class="p-1 text-center">
+                              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-100 text-slate-700 border border-slate-300">
+                                ${sug.confidence}%
+                              </span>
+                            </td>
+                            <td class="p-1">
+                              <span class="sug-matcher-badge inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border ${val.badgeClass} w-max" title="${escapeHtml(val.reasonText)}" data-page-index="${idx}" data-sug-id="${sug.id}">
+                                ${val.badge}
+                              </span>
+                            </td>
+                            <td class="p-1 text-center">
+                              <div class="flex items-center justify-center gap-1">
+                                <button type="button" class="btn-confirm-sug px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-semibold transition"
+                                        data-page-index="${idx}" data-sug-id="${sug.id}" title="ยืนยันนำเข้ารายการนี้">
+                                  <i class="fa-solid fa-check"></i> ยืนยัน
+                                </button>
+                                <button type="button" class="btn-reject-sug px-1.5 py-0.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded text-[10px] transition"
+                                        data-page-index="${idx}" data-sug-id="${sug.id}" title="ไม่ใช้">
+                                  <i class="fa-solid fa-xmark"></i>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        `;
+                      }).join('')}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            `;
+          })()}
+
           ${seqRowsHtml}
         </div>
       </div>
@@ -1752,11 +2216,88 @@ function renderPageManageList() {
     });
   });
 
+  // Live input events on suggestion rows
+  container.querySelectorAll('input.input-sug-seq, input.input-sug-first, input.input-sug-last, input.input-sug-qty').forEach(inp => {
+    inp.addEventListener('input', (e) => {
+      const pIdx = parseInt(e.target.getAttribute('data-page-index'), 10);
+      const row = e.target.closest('[data-sug-row]');
+      if (row) {
+        const sNo = parseInt(row.querySelector('.input-sug-seq')?.value, 10) || null;
+        const fTrack = cleanTrackNo(row.querySelector('.input-sug-first')?.value);
+        const lTrack = cleanTrackNo(row.querySelector('.input-sug-last')?.value);
+        const qVal = parseInt(row.querySelector('.input-sug-qty')?.value, 10) || 1;
+        const badgeEl = row.querySelector('.sug-matcher-badge');
+        if (badgeEl) {
+          const val = evaluateSequenceValidation({ seqNo: sNo, firstTrack: fTrack, lastTrack: lTrack, qty: qVal }, state.photos[pIdx]?.detectedRcpt, allSeqs);
+          badgeEl.className = `sug-matcher-badge inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border ${val.badgeClass} w-max`;
+          badgeEl.textContent = val.badge;
+          badgeEl.title = val.reasonText;
+        }
+      }
+    });
+  });
+
   // Live input events on page RCPT
   container.querySelectorAll('input.input-page-rcpt').forEach(inp => {
     inp.addEventListener('input', () => {
       updateAllSequenceBadges();
     });
+  });
+
+  // Scan line items OCR buttons
+  container.querySelectorAll('.btn-scan-lines').forEach(btn => {
+    btn.onclick = (e) => {
+      const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
+      scanPhotoLineEvidence(pIdx);
+    };
+  });
+
+  // Handle "ใช้เลขนี้" (Use API review candidate into editable input - DOES NOT auto-confirm)
+  container.querySelectorAll('.btn-use-candidate').forEach(btn => {
+    btn.onclick = (e) => {
+      const candidate = e.currentTarget.getAttribute('data-candidate');
+      const row = e.currentTarget.closest('[data-sug-row]');
+      if (row && candidate) {
+        const inputFirst = row.querySelector('.input-sug-first');
+        if (inputFirst) {
+          inputFirst.value = candidate;
+          inputFirst.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+    };
+  });
+
+  // Confirm single OCR suggestion
+  container.querySelectorAll('.btn-confirm-sug').forEach(btn => {
+    btn.onclick = (e) => {
+      const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
+      const sugId = e.currentTarget.getAttribute('data-sug-id');
+      const row = e.currentTarget.closest('[data-sug-row]');
+      const editedValues = row ? {
+        seqNo: parseInt(row.querySelector('.input-sug-seq')?.value, 10) || null,
+        firstTrack: cleanTrackNo(row.querySelector('.input-sug-first')?.value),
+        lastTrack: cleanTrackNo(row.querySelector('.input-sug-last')?.value),
+        qty: parseInt(row.querySelector('.input-sug-qty')?.value, 10) || 1
+      } : null;
+      confirmOcrSuggestion(pIdx, sugId, editedValues);
+    };
+  });
+
+  // Reject single OCR suggestion
+  container.querySelectorAll('.btn-reject-sug').forEach(btn => {
+    btn.onclick = (e) => {
+      const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
+      const sugId = e.currentTarget.getAttribute('data-sug-id');
+      rejectOcrSuggestion(pIdx, sugId);
+    };
+  });
+
+  // Confirm all suggestions for photo
+  container.querySelectorAll('.btn-confirm-all-sug').forEach(btn => {
+    btn.onclick = (e) => {
+      const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
+      confirmAllOcrSuggestions(pIdx);
+    };
   });
 
   // Add sequence buttons
@@ -2884,11 +3425,38 @@ function runMatcherShadowValidation(rawApiItems = null, paperEvidence = null) {
 }
 
 if (typeof window !== 'undefined') {
+  window.cleanTrackNo = cleanTrackNo;
+  window.extractTrackCandidates = extractTrackCandidates;
+  window.levenshteinDistance = levenshteinDistance;
+  window.findApiTrackCandidate = findApiTrackCandidate;
+  window.parseReceiptLineEvidence = parseReceiptLineEvidence;
+  window.preprocessLinesForOcr = preprocessLinesForOcr;
+  window.scanPhotoLineEvidence = scanPhotoLineEvidence;
+  window.confirmOcrSuggestion = confirmOcrSuggestion;
+  window.rejectOcrSuggestion = rejectOcrSuggestion;
+  window.confirmAllOcrSuggestions = confirmAllOcrSuggestions;
   window.buildMatcherPaperEvidence = buildMatcherPaperEvidence;
   window.buildMatcherShadowInput = buildMatcherShadowInput;
   window.runMatcherShadowValidation = runMatcherShadowValidation;
   window.evaluateSequenceValidation = evaluateSequenceValidation;
   window.getMatcherShadowResult = () => matcherShadowResult;
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    cleanTrackNo,
+    extractTrackCandidates,
+    levenshteinDistance,
+    findApiTrackCandidate,
+    parseReceiptLineEvidence,
+    confirmOcrSuggestion,
+    rejectOcrSuggestion,
+    confirmAllOcrSuggestions,
+    buildMatcherPaperEvidence,
+    buildMatcherShadowInput,
+    runMatcherShadowValidation,
+    evaluateSequenceValidation
+  };
 }
 
 function processApiItems(items) {
