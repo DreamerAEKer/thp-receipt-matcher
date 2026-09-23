@@ -688,6 +688,121 @@ function findApiTrackCandidate(rawTrack, apiItems, maxDistance = 3) {
 }
 
 /**
+ * Searches actual imported track array for a nominal-endpoint range review candidate.
+ * Strictly SUGGESTION ONLY — NEVER AUTO-CORRECT OR AUTO-APPLY.
+ *
+ * Rules:
+ * - firstTrack exact match exists at index A in imported tracks
+ * - qty is an integer > 1
+ * - printed lastTrack does NOT exist in imported tracks
+ * - A + qty - 1 is within array bounds
+ * - All tracks in slice are real imported tracks
+ * - No track in slice is assigned to another photo
+ * - No duplicate tracks in slice or in source
+ * - Does not overlap another known sequence boundary
+ *
+ * NEVER uses numeric serial arithmetic, prefixes, or step assumptions.
+ */
+function findRangeReviewCandidate(seq, apiItems, allSeqs = [], currentPhotoIndex = null) {
+  if (!seq || typeof seq !== 'object') {
+    return { status: 'none', candidate: null, reason: 'Invalid sequence' };
+  }
+  const normFirst = cleanTrackNo(seq.firstTrack);
+  const normLast = cleanTrackNo(seq.lastTrack);
+  const qty = Number(seq.qty);
+
+  if (!normFirst) {
+    return { status: 'none', candidate: null, reason: 'firstTrack missing' };
+  }
+  if (!Number.isInteger(qty) || qty <= 1) {
+    return { status: 'none', candidate: null, reason: 'qty missing or not a positive integer > 1' };
+  }
+
+  const items = Array.isArray(apiItems) ? apiItems : [];
+  if (items.length === 0) {
+    return { status: 'none', candidate: null, reason: 'No imported tracks available' };
+  }
+
+  const trackIndexMap = new Map();
+  items.forEach((item, idx) => {
+    const t = cleanTrackNo(item?.barcode || item?.track_no || item?.trackNo || (typeof item === 'string' ? item : ''));
+    if (!t) return;
+    if (!trackIndexMap.has(t)) {
+      trackIndexMap.set(t, [idx]);
+    } else {
+      trackIndexMap.get(t).push(idx);
+    }
+  });
+
+  const firstIndexes = trackIndexMap.get(normFirst);
+  if (!firstIndexes || firstIndexes.length === 0) {
+    return { status: 'none', candidate: null, reason: 'firstTrack not found in actual imported tracks' };
+  }
+  if (firstIndexes.length > 1) {
+    return { status: 'none', candidate: null, reason: 'firstTrack is duplicate in actual imported tracks' };
+  }
+
+  const startIdx = firstIndexes[0];
+
+  // If printed lastTrack already exists in imported tracks, no review candidate needed
+  if (normLast && trackIndexMap.has(normLast)) {
+    return { status: 'none', candidate: null, reason: 'printed lastTrack already exists in actual imported tracks' };
+  }
+
+  const targetIdx = startIdx + qty - 1;
+  if (targetIdx >= items.length || targetIdx < 0) {
+    return { status: 'none', candidate: null, reason: 'Candidate slice exceeds actual imported track array' };
+  }
+
+  const sliceTracks = [];
+  for (let i = startIdx; i <= targetIdx; i++) {
+    const t = cleanTrackNo(items[i]?.barcode || items[i]?.track_no || items[i]?.trackNo || (typeof items[i] === 'string' ? items[i] : ''));
+    if (!t) {
+      return { status: 'none', candidate: null, reason: 'Invalid or empty track within candidate slice' };
+    }
+    if (trackIndexMap.get(t)?.length > 1) {
+      return { status: 'none', candidate: null, reason: `Slice member "${t}" is duplicate in actual imported tracks` };
+    }
+    if (currentPhotoIndex !== null && items[i]?.photoIndex !== null && items[i]?.photoIndex !== undefined && items[i]?.photoIndex !== currentPhotoIndex) {
+      return { status: 'none', candidate: null, reason: `Track at index ${i} is already assigned to photo ${items[i].photoIndex}` };
+    }
+    sliceTracks.push(t);
+  }
+
+  const uniqueSliceSet = new Set(sliceTracks);
+  if (uniqueSliceSet.size !== qty) {
+    return { status: 'none', candidate: null, reason: 'Duplicate tracking numbers detected within candidate slice' };
+  }
+
+  if (Array.isArray(allSeqs) && allSeqs.length > 0) {
+    for (const other of allSeqs) {
+      if (other === seq) continue;
+      const otherFirst = cleanTrackNo(other.firstTrack);
+      if (!otherFirst) continue;
+      const otherFirstIndices = trackIndexMap.get(otherFirst);
+      if (otherFirstIndices && otherFirstIndices.length === 1) {
+        const oIdx = otherFirstIndices[0];
+        if (oIdx > startIdx && oIdx <= targetIdx) {
+          return { status: 'none', candidate: null, reason: 'Candidate slice overlaps start of another sequence' };
+        }
+      }
+    }
+  }
+
+  const candidateTrack = sliceTracks[sliceTracks.length - 1];
+  return {
+    status: 'candidate',
+    candidate: candidateTrack,
+    candidateIndex: targetIdx,
+    startIndex: startIdx,
+    qty,
+    printedLastTrack: seq.lastTrack || null,
+    reason: `Candidate discovered at index ${targetIdx} (${qty} items from index ${startIdx})`,
+    source: 'range-candidate'
+  };
+}
+
+/**
  * Parses line items from OCR lines and returns non-binding suggestion objects.
  * Never modifies photo.sequences directly.
  */
@@ -739,6 +854,7 @@ function parseReceiptLineEvidence(lines, rcptNo = null, apiItems = []) {
         seqNo: currentSeq !== null ? currentSeq : null,
         firstTrack: first,
         lastTrack: last,
+        printedLastTrack: last,
         qty: qty,
         rawText: currentRaw || text,
         confidence: avgConf,
@@ -807,6 +923,9 @@ function confirmOcrSuggestion(photoIndex, suggestionId, editedValues = null) {
   const finalSeqNo = (editedValues && editedValues.seqNo !== undefined) ? (Number(editedValues.seqNo) || null) : sug.seqNo;
   const finalFirst = (editedValues && editedValues.firstTrack !== undefined) ? cleanTrackNo(editedValues.firstTrack) : sug.firstTrack;
   let finalLast = (editedValues && editedValues.lastTrack !== undefined) ? cleanTrackNo(editedValues.lastTrack) : sug.lastTrack;
+  const finalPrintedLast = (editedValues && editedValues.printedLastTrack !== undefined)
+    ? editedValues.printedLastTrack
+    : (sug.printedLastTrack || sug.lastTrack || null);
   let finalQty = (editedValues && editedValues.qty !== undefined) ? (Number(editedValues.qty) || 1) : sug.qty;
 
   if (finalFirst && (!finalLast || finalLast === finalFirst)) {
@@ -819,6 +938,7 @@ function confirmOcrSuggestion(photoIndex, suggestionId, editedValues = null) {
     seqNo: finalSeqNo,
     firstTrack: finalFirst,
     lastTrack: finalLast,
+    printedLastTrack: finalPrintedLast,
     qty: finalQty,
     provenance: 'manual',
     fieldSources: {
@@ -833,7 +953,9 @@ function confirmOcrSuggestion(photoIndex, suggestionId, editedValues = null) {
   });
 
   sug.status = 'confirmed';
-  renderPageManageList();
+  if (typeof renderPageManageList === 'function' && typeof document !== 'undefined') {
+    renderPageManageList();
+  }
 }
 
 /**
@@ -847,7 +969,9 @@ function rejectOcrSuggestion(photoIndex, suggestionId) {
   if (sug) {
     sug.status = 'rejected';
   }
-  renderPageManageList();
+  if (typeof renderPageManageList === 'function' && typeof document !== 'undefined') {
+    renderPageManageList();
+  }
 }
 
 /**
@@ -1133,6 +1257,10 @@ function alignReceiptItemsToPhotos() {
       if (item.mappingSource === 'matcher' && typeof item.photoIndex === 'number') {
         return;
       }
+      // Excel-imported items remain unmapped until confirmed by Matcher/evidence
+      if (item.mappingSource === 'excel' && (item.photoIndex === null || item.photoIndex === undefined)) {
+        return;
+      }
 
       const itemSeq = Number(item.no);
       let matchedIndex = -1;
@@ -1178,6 +1306,12 @@ function alignReceiptItemsToPhotos() {
     // If photos do NOT have ranges defined yet, distribute proportionally
     const totalItems = state.receiptItems.length;
     state.receiptItems.forEach((item, index) => {
+      if (item.mappingSource === 'matcher' && typeof item.photoIndex === 'number') {
+        return;
+      }
+      if (item.mappingSource === 'excel' && (item.photoIndex === null || item.photoIndex === undefined)) {
+        return;
+      }
       item.photoIndex = totalPhotos > 0
         ? Math.min(totalPhotos - 1, Math.floor(index * totalPhotos / Math.max(1, totalItems)))
         : 0;
@@ -1186,6 +1320,7 @@ function alignReceiptItemsToPhotos() {
     // Auto assign startNo and endNo to photos from items
     state.photos.forEach(p => { delete p.startNo; delete p.endNo; });
     state.receiptItems.forEach(item => {
+      if (typeof item.photoIndex !== 'number') return;
       const photo = state.photos[item.photoIndex];
       if (photo) {
         if (!photo.startNo || item.no < photo.startNo) photo.startNo = item.no;
@@ -2007,6 +2142,43 @@ function renderPageManageList() {
             <td class="p-1">
               <input type="text" class="input-seq-last w-full min-w-[125px] px-2 py-1 text-xs border border-slate-300 rounded font-mono uppercase bg-white"
                      value="${lTrackDisplay}" placeholder="เว้นว่างถ้าเดี่ยว" data-page-index="${idx}" data-seq-index="${sIdx}">
+              ${(() => {
+                if (val.status === 'conflict' && s.firstTrack && s.qty > 1) {
+                  const rangeCand = findRangeReviewCandidate(s, state?.receiptItems || [], allSeqs, idx);
+                  if (rangeCand && rangeCand.status === 'candidate') {
+                    return `
+                      <div class="mt-1 p-1.5 bg-amber-50/90 border border-amber-300 rounded text-[10px] text-amber-900 space-y-1">
+                        <div class="flex items-center justify-between gap-1 flex-wrap">
+                          <span class="font-semibold text-amber-800">
+                            <i class="fa-solid fa-triangle-exclamation text-amber-600"></i> เลขปลายที่พิมพ์:
+                            <span class="font-mono text-slate-700">${escapeHtml(s.lastTrack)}</span>
+                            <span class="text-rose-600 font-medium">(ไม่พบใน Tracking จริง)</span>
+                          </span>
+                          <span class="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-200 text-amber-900 border border-amber-300">
+                            Candidate / ต้องตรวจสอบ
+                          </span>
+                        </div>
+                        <div class="flex items-center justify-between gap-1 pt-0.5 border-t border-amber-200 flex-wrap">
+                          <span class="truncate">
+                            จากเลขเริ่มต้น + จำนวน ${s.qty} ชิ้น → พบรายการจริงที่เป็นไปได้:
+                            <strong class="font-mono text-blue-700 font-bold">${rangeCand.candidate}</strong>
+                          </span>
+                          <button type="button" class="btn-use-range-candidate-manual shrink-0 px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-medium transition shadow-2xs"
+                                  data-page-index="${idx}" data-seq-index="${sIdx}" data-candidate="${rangeCand.candidate}" data-printed-last="${escapeHtml(s.lastTrack)}">
+                            ใช้เลขนี้
+                          </button>
+                        </div>
+                      </div>
+                    `;
+                  }
+                }
+                return '';
+              })()}
+              ${s.printedLastTrack && s.printedLastTrack !== s.lastTrack ? `
+                <div class="mt-0.5 text-[9px] text-slate-400 font-mono" title="หลักฐานที่พิมพ์บนใบเสร็จเดิม">
+                  (เลขพิมพ์เดิม: ${escapeHtml(s.printedLastTrack)})
+                </div>
+              ` : ''}
             </td>
             <td class="p-1 text-center">
               <input type="number" min="1" class="input-seq-qty w-12 px-1 py-1 text-xs border border-slate-300 rounded font-mono text-center bg-white"
@@ -2199,6 +2371,43 @@ function renderPageManageList() {
                             <td class="p-1">
                               <input type="text" class="input-sug-last w-full min-w-[125px] px-2 py-1 text-xs border border-amber-300 rounded font-mono uppercase bg-white"
                                      value="${lTrackDisplay}" placeholder="เว้นว่างถ้าเดี่ยว" data-page-index="${idx}" data-sug-id="${sug.id}">
+                              ${(() => {
+                                if (val.status === 'conflict' && sug.firstTrack && sug.qty > 1) {
+                                  const rangeCand = findRangeReviewCandidate({ firstTrack: sug.firstTrack, lastTrack: sug.lastTrack, qty: sug.qty }, state?.receiptItems || [], allSeqs, idx);
+                                  if (rangeCand && rangeCand.status === 'candidate') {
+                                    return `
+                                      <div class="mt-1 p-1.5 bg-amber-50/90 border border-amber-300 rounded text-[10px] text-amber-900 space-y-1">
+                                        <div class="flex items-center justify-between gap-1 flex-wrap">
+                                          <span class="font-semibold text-amber-800">
+                                            <i class="fa-solid fa-triangle-exclamation text-amber-600"></i> เลขปลายที่พิมพ์:
+                                            <span class="font-mono text-slate-700">${escapeHtml(sug.lastTrack)}</span>
+                                            <span class="text-rose-600 font-medium">(ไม่พบใน Tracking จริง)</span>
+                                          </span>
+                                          <span class="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-200 text-amber-900 border border-amber-300">
+                                            Candidate / ต้องตรวจสอบ
+                                          </span>
+                                        </div>
+                                        <div class="flex items-center justify-between gap-1 pt-0.5 border-t border-amber-200 flex-wrap">
+                                          <span class="truncate">
+                                            จากเลขเริ่มต้น + จำนวน ${sug.qty} ชิ้น → พบรายการจริงที่เป็นไปได้:
+                                            <strong class="font-mono text-blue-700 font-bold">${rangeCand.candidate}</strong>
+                                          </span>
+                                          <button type="button" class="btn-use-range-candidate shrink-0 px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded text-[10px] font-medium transition shadow-2xs"
+                                                  data-page-index="${idx}" data-sug-id="${sug.id}" data-candidate="${rangeCand.candidate}" data-printed-last="${escapeHtml(sug.lastTrack)}">
+                                            ใช้เลขนี้
+                                          </button>
+                                        </div>
+                                      </div>
+                                    `;
+                                  }
+                                }
+                                return '';
+                              })()}
+                              ${sug.printedLastTrack && sug.printedLastTrack !== sug.lastTrack ? `
+                                <div class="mt-0.5 text-[9px] text-slate-400 font-mono" title="หลักฐานที่พิมพ์บนใบเสร็จเดิม">
+                                  (เลขพิมพ์เดิม: ${escapeHtml(sug.printedLastTrack)})
+                                </div>
+                              ` : ''}
                             </td>
                             <td class="p-1 text-center">
                               <input type="number" min="1" class="input-sug-qty w-12 px-1 py-1 text-xs border border-amber-300 rounded font-mono text-center bg-white"
@@ -2342,16 +2551,73 @@ function renderPageManageList() {
     };
   });
 
+  // Handle "ใช้เลขนี้" for range candidate in OCR suggestions (DOES NOT auto-confirm)
+  container.querySelectorAll('.btn-use-range-candidate').forEach(btn => {
+    btn.onclick = (e) => {
+      const candidate = e.currentTarget.getAttribute('data-candidate');
+      const printedLast = e.currentTarget.getAttribute('data-printed-last');
+      const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
+      const sugId = e.currentTarget.getAttribute('data-sug-id');
+      const sug = state.photos[pIdx]?.ocrSequenceSuggestions?.find(s => String(s.id) === String(sugId));
+      if (sug && candidate) {
+        if (printedLast && !sug.printedLastTrack) {
+          sug.printedLastTrack = printedLast;
+        } else if (!sug.printedLastTrack) {
+          sug.printedLastTrack = sug.lastTrack;
+        }
+        sug.lastTrack = candidate;
+      }
+      const row = e.currentTarget.closest('[data-sug-row]');
+      if (row && candidate) {
+        if (printedLast) row.setAttribute('data-printed-last', printedLast);
+        const inputLast = row.querySelector('.input-sug-last');
+        if (inputLast) {
+          inputLast.value = candidate;
+          inputLast.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+    };
+  });
+
+  // Handle "ใช้เลขนี้" for range candidate in confirmed manual sequences (DOES NOT auto-apply)
+  container.querySelectorAll('.btn-use-range-candidate-manual').forEach(btn => {
+    btn.onclick = (e) => {
+      const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
+      const sIdx = parseInt(e.currentTarget.getAttribute('data-seq-index'), 10);
+      const candidate = e.currentTarget.getAttribute('data-candidate');
+      const printedLast = e.currentTarget.getAttribute('data-printed-last');
+      const seq = state.photos[pIdx]?.sequences?.[sIdx];
+      if (seq && candidate) {
+        if (printedLast && !seq.printedLastTrack) {
+          seq.printedLastTrack = printedLast;
+        } else if (!seq.printedLastTrack) {
+          seq.printedLastTrack = seq.lastTrack;
+        }
+        seq.lastTrack = candidate;
+        const row = e.currentTarget.closest('[data-seq-row]');
+        if (row) {
+          const inputLast = row.querySelector('.input-seq-last');
+          if (inputLast) {
+            inputLast.value = candidate;
+            inputLast.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+        }
+      }
+    };
+  });
+
   // Confirm single OCR suggestion
   container.querySelectorAll('.btn-confirm-sug').forEach(btn => {
     btn.onclick = (e) => {
       const pIdx = parseInt(e.currentTarget.getAttribute('data-page-index'), 10);
       const sugId = e.currentTarget.getAttribute('data-sug-id');
+      const sug = state.photos[pIdx]?.ocrSequenceSuggestions?.find(s => String(s.id) === String(sugId));
       const row = e.currentTarget.closest('[data-sug-row]');
       const editedValues = row ? {
         seqNo: parseInt(row.querySelector('.input-sug-seq')?.value, 10) || null,
         firstTrack: cleanTrackNo(row.querySelector('.input-sug-first')?.value),
         lastTrack: cleanTrackNo(row.querySelector('.input-sug-last')?.value),
+        printedLastTrack: row.getAttribute('data-printed-last') || sug?.printedLastTrack || null,
         qty: parseInt(row.querySelector('.input-sug-qty')?.value, 10) || 1
       } : null;
       confirmOcrSuggestion(pIdx, sugId, editedValues);
@@ -3915,6 +4181,9 @@ if (typeof window !== 'undefined') {
   window.applyMatcherMapping = applyMatcherMapping;
   window.rollbackMatcherMapping = rollbackMatcherMapping;
   window.getMatcherShadowResult = () => matcherShadowResult;
+  window.extractTrackingFromExcelRows = extractTrackingFromExcelRows;
+  window.processExcelRows = processExcelRows;
+  window.findRangeReviewCandidate = findRangeReviewCandidate;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -3923,6 +4192,7 @@ if (typeof module !== 'undefined' && module.exports) {
     extractTrackCandidates,
     levenshteinDistance,
     findApiTrackCandidate,
+    findRangeReviewCandidate,
     parseReceiptLineEvidence,
     confirmOcrSuggestion,
     rejectOcrSuggestion,
@@ -3940,7 +4210,9 @@ if (typeof module !== 'undefined' && module.exports) {
     extractReceiptApiItems,
     processApiItems,
     fetchTrackingByTR,
-    state
+    state,
+    extractTrackingFromExcelRows,
+    processExcelRows
   };
 }
 
@@ -4109,7 +4381,6 @@ function handleExcelUpload(e) {
       const json = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
       
       processExcelRows(json);
-      alert("นำเข้าสำเร็จ: " + json.length + " บรรทัด");
     } catch (err) {
       alert('เกิดข้อผิดพลาดในการอ่านไฟล์ Excel: ' + err.message);
     }
@@ -4117,72 +4388,160 @@ function handleExcelUpload(e) {
   reader.readAsArrayBuffer(file);
 }
 
-function processExcelRows(rows) {
-  const barcodeRegex = /[A-Z]{2}\s*\d{9}\s*TH/i;
-  const importedBarcodes = [];
+function extractTrackingFromExcelRows(rows) {
+  // S10-style tracking number: 2 letters, 9 digits, 2 letters
+  const barcodeRegex = /\b([A-Za-z]{2}\s*\d{9}\s*[A-Za-z]{2})\b/;
+  const seen = new Set();
+  const tracks = [];
+  let rjCount = 0;
+  let rrCount = 0;
+  let otherCount = 0;
+  let duplicateRows = 0;
+  let skippedRows = 0;
 
-  rows.forEach(row => {
-    const rowStr = Array.isArray(row) ? row.join(' ') : String(row);
+  if (!Array.isArray(rows)) {
+    return {
+      tracks: [],
+      uniqueCount: 0,
+      rjCount: 0,
+      rrCount: 0,
+      otherCount: 0,
+      duplicateRows: 0,
+      skippedRows: 0,
+      totalRows: 0
+    };
+  }
+
+  rows.forEach((row, idx) => {
+    // Skip header row if it contains column labels and no valid tracking
+    if (idx === 0 && Array.isArray(row)) {
+      const headerStr = row.join(' ');
+      if (!barcodeRegex.test(headerStr) && (headerStr.includes('เลข') || headerStr.toLowerCase().includes('track') || headerStr.toLowerCase().includes('barcode'))) {
+        skippedRows++;
+        return;
+      }
+    }
+
+    const rowStr = Array.isArray(row) ? row.join(' ') : String(row || '');
     const match = rowStr.match(barcodeRegex);
     if (match) {
-      const cleanBarcode = cleanTrackNo(match[0]);
-      if (!importedBarcodes.includes(cleanBarcode)) importedBarcodes.push(cleanBarcode);
-      
-      let statusText = 'พบข้อมูล';
-      let statusDate = '';
-      let statusType = 'pending';
+      const cleanTrack = cleanTrackNo(match[1]);
+      if (/^[A-Z]{2}\d{9}[A-Z]{2}$/.test(cleanTrack)) {
+        if (!seen.has(cleanTrack)) {
+          seen.add(cleanTrack);
+          tracks.push(cleanTrack);
+          if (cleanTrack.startsWith('RJ')) {
+            rjCount++;
+          } else if (cleanTrack.startsWith('RR')) {
+            rrCount++;
+          } else {
+            otherCount++;
+          }
+        } else {
+          duplicateRows++;
+        }
 
-      if (rowStr.includes('สำเร็จ') || rowStr.includes('นำจ่ายสำเร็จ') || rowStr.includes('ผู้รับรับเอง')) {
-        statusText = 'นำจ่ายสำเร็จ';
-        statusType = 'success';
-      } else if (rowStr.includes('ระหว่างทาง') || rowStr.includes('ใส่ของลงถุง') || rowStr.includes('รับฝาก')) {
-        statusText = 'อยู่ระหว่างจัดส่ง';
-        statusType = 'in_transit';
+        // Parse status for excelMap if state exists
+        if (typeof state !== 'undefined' && state.excelMap) {
+          let statusText = 'พบข้อมูล';
+          let statusDate = '';
+          let statusType = 'pending';
+
+          if (rowStr.includes('สำเร็จ') || rowStr.includes('นำจ่ายสำเร็จ') || rowStr.includes('ผู้รับรับเอง')) {
+            statusText = 'นำจ่ายสำเร็จ';
+            statusType = 'success';
+          } else if (rowStr.includes('ระหว่างทาง') || rowStr.includes('ใส่ของลงถุง') || rowStr.includes('รับฝาก')) {
+            statusText = 'อยู่ระหว่างจัดส่ง';
+            statusType = 'in_transit';
+          }
+
+          const dateMatch = rowStr.match(/\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}(\s+\d{1,2}:\d{2})?/);
+          if (dateMatch) {
+            statusDate = dateMatch[0];
+          }
+
+          const prev = state.excelMap.get(cleanTrack);
+          if (!prev || prev.statusType !== 'success' || statusType === 'success') {
+            state.excelMap.set(cleanTrack, {
+              barcode: cleanTrack,
+              destination: prev?.destination || '',
+              statusText: statusText,
+              statusDetail: rowStr,
+              statusDate: statusDate || prev?.statusDate || new Date().toLocaleDateString('th-TH'),
+              statusType: statusType,
+              depositDate: 'Imported',
+              baggingDate: '-'
+            });
+          }
+        }
+        return;
       }
-
-      const dateMatch = rowStr.match(/\d{1,2}\s+[\u0E00-\u0E7F\.]+\s+\d{2,4}(\s+\d{1,2}:\d{2})?/);
-      if (dateMatch) {
-        statusDate = dateMatch[0];
-      }
-
-      state.excelMap.set(cleanBarcode, {
-        barcode: cleanBarcode,
-        destination: (state.excelMap.get(cleanBarcode)?.destination || ''),
-        statusText: statusText,
-        statusDetail: rowStr,
-        statusDate: statusDate || new Date().toLocaleDateString('th-TH'),
-        statusType: statusType,
-        depositDate: 'Imported',
-        baggingDate: '-'
-      });
     }
+    skippedRows++;
   });
 
-  if (state.receiptItems.length === 0 && importedBarcodes.length > 0) {
-    state.receiptItems = importedBarcodes.map((barcode, index) => ({
+  return {
+    tracks,
+    uniqueCount: tracks.length,
+    rjCount,
+    rrCount,
+    otherCount,
+    duplicateRows,
+    skippedRows,
+    totalRows: rows.length
+  };
+}
+
+function processExcelRows(rows) {
+  const result = extractTrackingFromExcelRows(rows);
+
+  if (result.uniqueCount > 0) {
+    state.receiptItems = result.tracks.map((barcode, index) => ({
       no: index + 1,
       recipient: '-',
       weight: '-',
-      service: '-',
+      service: barcode.startsWith('RJ') ? 'จดหมายในประเทศ' : (barcode.startsWith('RR') ? 'จดหมายต่างประเทศ' : '-'),
       zip: '-',
-      destinationName: state.excelMap.get(barcode)?.destination || '-',
+      destinationName: (typeof state !== 'undefined' && state.excelMap?.get(barcode)?.destination) || '-',
       trackNo: barcode,
       trackFormatted: barcode,
       cost: 0,
       discount: 0,
       remoteFee: 0,
       extra: 0,
-      photoIndex: 0
+      photoIndex: null,      // MUST BE null (unmapped!)
+      alternatePhotoIndex: undefined,
+      receiptSeqNo: null,    // MUST BE null
+      rcptNo: null,          // MUST BE null
+      mappingSource: 'excel' // 'excel'
     }));
-    alignReceiptItemsToPhotos();
+
+    // Reset any previous applied matcher state
+    if (typeof state !== 'undefined') {
+      state.matcherAppliedSignature = null;
+      state.matcherApplyInfo = null;
+    }
+
+    let summaryMsg = `นำเข้า Tracking สำเร็จ ${result.uniqueCount} รายการ\n` +
+      `• RJ: ${result.rjCount} รายการ\n` +
+      `• RR: ${result.rrCount} รายการ`;
+    if (result.duplicateRows > 0) {
+      summaryMsg += `\n\n(ตัดรายการซ้ำจากประวัติสถานะแล้ว ${result.duplicateRows} แถว)`;
+    }
+    alert(summaryMsg);
+  } else {
+    alert('ไม่พบเลข Tracking ที่ถูกต้อง (S10-style) ในไฟล์ Excel');
   }
 
-  renderItems();
-  updateStats();
-  triggerAutoSave();
+  if (typeof document !== 'undefined') {
+    if (typeof renderItems === 'function') renderItems();
+    if (typeof updateStats === 'function') updateStats();
+    if (typeof triggerAutoSave === 'function') triggerAutoSave();
+  }
 }
 
 function renderItems() {
+  if (typeof document === 'undefined') return;
   const container = document.getElementById('itemsList');
   container.innerHTML = '';
 
@@ -4212,7 +4571,8 @@ function renderItems() {
     return true;
   }).sort((a, b) => Number(a.no) - Number(b.no));
 
-  document.getElementById('countBadge').textContent = filtered.length + " รายการ";
+  const isExcelSource = state.receiptItems.some(i => i.mappingSource === 'excel');
+  document.getElementById('countBadge').textContent = filtered.length + " รายการ" + (isExcelSource ? " (Excel)" : "");
 
   if (filtered.length === 0) {
     container.innerHTML = `
@@ -4289,9 +4649,15 @@ function renderItems() {
 
         <div class="flex items-center gap-1.5 shrink-0">
           <div class="flex items-center gap-1">
-            <span class="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200" title="หน้าหลัก">
-              หน้า ${(item.photoIndex ?? 0) + 1}
-            </span>
+            ${typeof item.photoIndex === 'number' ? `
+              <span class="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200" title="หน้าหลัก">
+                หน้า ${item.photoIndex + 1}
+              </span>
+            ` : `
+              <span class="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-400 border border-dashed border-slate-300" title="ยังไม่ได้จับคู่กับหน้าใบเสร็จ">
+                รอจับคู่
+              </span>
+            `}
             ${item.mappingSource === 'matcher' && item.receiptSeqNo ? `
               <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-300" title="จับคู่ด้วย Matcher (Seq ${item.receiptSeqNo})">
                 <i class="fa-solid fa-check text-[8px]"></i> Seq ${item.receiptSeqNo}
@@ -4441,6 +4807,7 @@ function showTrackTimeline(cleanBarcode) {
 }
 
 function updateStats() {
+  if (typeof document === 'undefined') return;
   let deliveredCount = 0;
   state.receiptItems.forEach(item => {
     const cleanTrack = cleanTrackNo(item.trackNo);
