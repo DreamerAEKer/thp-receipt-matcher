@@ -3189,11 +3189,7 @@ async function fetchTrackingByTR(trNumber) {
     }
 
     if (response.status === 404) {
-      const openWeb = confirm(
-        'ไม่พบข้อมูลเลข TR นี้ใน API\n\nรหัส: ' + fullTRCode +
-        '\nต้องการเปิดหน้า Dashboard เพื่อตรวจสอบหรือไม่?'
-      );
-      if (openWeb) window.open('https://track.thailandpost.co.th/dashboard', '_blank');
+      alert('ไม่พบข้อมูลเลข TR นี้ในระบบ API (รหัส: ' + fullTRCode + ')');
       return;
     }
 
@@ -3213,18 +3209,9 @@ async function fetchTrackingByTR(trNumber) {
       const isQuota = /quota|over\s*quota/i.test(msg);
 
       if (isQuota) {
-        const openDash = confirm(
-          '⚠️ API ปณท เกินโควตาการเรียกใช้งาน\n\n' +
-          'ระบบ ปณท ปฏิเสธคำขอชั่วคราว: ' + msg + '\n\n' +
-          'ต้องการเปิดหน้า Dashboard ปณท หรือไม่?'
-        );
-        if (openDash) window.open('https://track.thailandpost.co.th/dashboard', '_blank');
+        alert('⚠️ API ปณท เกินโควตาการเรียกใช้งาน\n\nระบบ ปณท ปฏิเสธคำขอชั่วคราว: ' + msg);
       } else {
-        const openDash = confirm(
-          'API ปณท ปฏิเสธคำขอ: ' + msg + '\n\n' +
-          'ต้องการเปิดหน้า Dashboard เพื่อตรวจสอบหรือไม่?'
-        );
-        if (openDash) window.open('https://track.thailandpost.co.th/dashboard', '_blank');
+        alert('API ปณท ปฏิเสธคำขอ: ' + msg);
       }
       return;
     }
@@ -3236,19 +3223,14 @@ async function fetchTrackingByTR(trNumber) {
       return;
     }
 
-
-    const openWeb = confirm(
-      'API ตอบกลับสำเร็จ แต่ไม่พบรายการสำหรับเลข TR นี้\n\nรหัสที่ส่ง: ' + fullTRCode +
-      '\nต้องการเปิดหน้า Dashboard เพื่อตรวจสอบหรือไม่?'
-    );
-    if (openWeb) window.open('https://track.thailandpost.co.th/dashboard', '_blank');
+    alert('API ตอบกลับสำเร็จ แต่ไม่พบรายการสำหรับเลข TR นี้ (รหัส: ' + fullTRCode + ')');
   } catch (err) {
     console.error(err);
     if (err.message === 'AUTH_FAILED') {
       const openSettings = confirm(
         'ไม่สามารถขอ Access Token จาก Token Key ได้\n' +
         'สถานะ: ' + (err.status || '-') +
-        '\n\nกรุณาตรวจสอบ Token Key ในหน้า Dashboard ต้องการเปิดหน้าตั้งค่าหรือไม่?'
+        '\n\nต้องการเปิดหน้าตั้งค่า Token ในแอปหรือไม่?'
       );
       if (openSettings) document.getElementById('btnOpenApiModal').click();
     } else if (err.message === 'AUTH_TOKEN_MISSING') {
@@ -3953,7 +3935,12 @@ if (typeof module !== 'undefined' && module.exports) {
     isMatcherMappingStale,
     buildMatcherApplyPlan,
     applyMatcherMapping,
-    rollbackMatcherMapping
+    rollbackMatcherMapping,
+    buildReceiptCode,
+    extractReceiptApiItems,
+    processApiItems,
+    fetchTrackingByTR,
+    state
   };
 }
 
