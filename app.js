@@ -13,12 +13,15 @@ const state = {
   isScrollingByProgram: false,
   cameraStream: null,
   cameraFacingMode: 'environment',
-  defaultZipPrefix: localStorage.getItem('thp_zip_prefix') || '10501',
-  apiToken: localStorage.getItem('thp_api_token') || '',
-  apiAccessToken: localStorage.getItem('thp_api_access_token') || '',
-  apiAccessTokenExpire: localStorage.getItem('thp_api_access_token_expire') || '',
+  defaultZipPrefix: (typeof localStorage !== 'undefined' ? localStorage.getItem('thp_zip_prefix') : null) || '10501',
+  apiToken: (typeof localStorage !== 'undefined' ? localStorage.getItem('thp_api_token') : null) || '',
+  apiAccessToken: (typeof localStorage !== 'undefined' ? localStorage.getItem('thp_api_access_token') : null) || '',
+  apiAccessTokenExpire: (typeof localStorage !== 'undefined' ? localStorage.getItem('thp_api_access_token_expire') : null) || '',
   currentSessionId: null,
   mobileViewMode: 'split',
+  matcherAppliedSignature: null,
+  matcherApplyInfo: null,
+  lastPreApplySnapshot: null,
   
   // Crop Editor State (Adobe Scan / Microsoft Lens Style)
   rawCaptureImage: null,
@@ -284,29 +287,31 @@ function _setupApiInspector() {
 
 
 // Initialize
-document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('labelZipPrefix').textContent = '(' + state.defaultZipPrefix + ')';
-  document.getElementById('apiZipPrefixInput').value = state.defaultZipPrefix;
-  document.getElementById('apiTokenInput').value = state.apiToken;
+if (typeof document !== 'undefined') {
+  document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('labelZipPrefix').textContent = '(' + state.defaultZipPrefix + ')';
+    document.getElementById('apiZipPrefixInput').value = state.defaultZipPrefix;
+    document.getElementById('apiTokenInput').value = state.apiToken;
 
-  setupPhotoControls();
-  setupEventListeners();
-  setupSyncScroll();
-  setupLensCamera();
-  setupCornerCropEditor();
-  setupApiModal();
-  setupHistory();
-  setupPageManager();
-  setupMobileTabs();
-  _setupApiInspector();
-  renderPhotoTabs();
-  renderItems();
-  updateStats();
-  showEmptyPhotoState();
+    setupPhotoControls();
+    setupEventListeners();
+    setupSyncScroll();
+    setupLensCamera();
+    setupCornerCropEditor();
+    setupApiModal();
+    setupHistory();
+    setupPageManager();
+    setupMobileTabs();
+    _setupApiInspector();
+    renderPhotoTabs();
+    renderItems();
+    updateStats();
+    showEmptyPhotoState();
 
-  // Auto-restore latest session if available
-  autoRestoreLatestSession();
-});
+    // Auto-restore latest session if available
+    autoRestoreLatestSession();
+  });
+}
 
 async function autoRestoreLatestSession() {
   try {
@@ -1124,6 +1129,11 @@ function alignReceiptItemsToPhotos() {
   if (hasConfiguredRanges) {
     // Map items to photo by matching item.no into [photo.startNo, photo.endNo]
     state.receiptItems.forEach(item => {
+      // If item already has an active verified Matcher mapping, preserve it
+      if (item.mappingSource === 'matcher' && typeof item.photoIndex === 'number') {
+        return;
+      }
+
       const itemSeq = Number(item.no);
       let matchedIndex = -1;
       let alternateIndex = -1;
@@ -1408,7 +1418,9 @@ async function saveCurrentSession({ silent = false } = {}) {
     receiptItems,
     excelEntries,
     photos: await serializePhotosForStorage(),
-    stats: getSessionStats(receiptItems, excelEntries)
+    stats: getSessionStats(receiptItems, excelEntries),
+    matcherAppliedSignature: state.matcherAppliedSignature || null,
+    matcherApplyInfo: state.matcherApplyInfo || null
   };
 
   await putHistory(record);
@@ -1436,6 +1448,9 @@ async function restoreHistory(id) {
   state.receiptItems = JSON.parse(JSON.stringify(record.receiptItems || []));
   state.excelMap = new Map(record.excelEntries || []);
   state.photos = hydratePhotos(record.photos || []);
+  state.matcherAppliedSignature = record.matcherAppliedSignature || null;
+  state.matcherApplyInfo = record.matcherApplyInfo || null;
+  state.lastPreApplySnapshot = null;
   state.activeItemNo = state.receiptItems[0]?.no || 1;
   state.activePhotoIndex = 0;
   state.currentFilter = 'all';
@@ -1880,6 +1895,10 @@ function renderPageManageList() {
   const container = document.getElementById('pageManageList');
   if (!container) return;
 
+  // Evaluate Matcher Apply Plan and Stale State
+  const applyPlan = buildMatcherApplyPlan(state.photos, state.receiptItems);
+  const isStale = isMatcherMappingStale(state.photos, state.matcherAppliedSignature);
+
   // Flatten all sequences across photos for duplicate detection
   const allSeqs = [];
   state.photos.forEach(p => {
@@ -1889,7 +1908,63 @@ function renderPageManageList() {
     });
   });
 
-  container.innerHTML = state.photos.map((photo, idx) => {
+  const matcherBannerHtml = `
+    <div class="p-3 bg-white border ${applyPlan.conflictCount > 0 ? 'border-rose-300 bg-rose-50/30' : (applyPlan.isEligible ? 'border-emerald-300 bg-emerald-50/20' : 'border-slate-200')} rounded-xl mb-3 shadow-xs" id="matcherApplyBanner">
+      <div class="flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <i class="fa-solid fa-wand-magic-sparkles text-sm ${applyPlan.conflictCount > 0 ? 'text-rose-600' : 'text-emerald-600'}"></i>
+            <h4 class="text-xs font-bold text-slate-800">จับคู่รูปใบเสร็จกับพัสดุ (Matcher Supervised Apply)</h4>
+            ${applyPlan.conflictCount > 0 ? `
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300">
+                ✕ ขัดแย้ง ${applyPlan.conflictCount} รายการ
+              </span>
+            ` : (isStale ? `
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-300">
+                ⚠️ หลักฐานเปลี่ยน — กรุณากด Apply ใหม่
+              </span>
+            ` : (state.matcherAppliedSignature ? `
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                ✓ ใช้งานการจับคู่แล้ว (${state.matcherApplyInfo?.mappedCount || applyPlan.readyCount} รายการ)
+              </span>
+            ` : ''))}
+          </div>
+          <div class="flex items-center gap-2 mt-1 text-[11px] text-slate-600 flex-wrap">
+            <span>พร้อมจับคู่: <strong class="font-mono text-emerald-700">${applyPlan.readyCount}</strong> / ${applyPlan.totalApiCount} รายการ</span>
+            ${applyPlan.conflictCount > 0 ? `<span class="text-rose-600 font-semibold">• ต้องแก้ไขข้อขัดแย้ง: <strong>${applyPlan.conflictCount}</strong></span>` : ''}
+            ${applyPlan.incompleteCount > 0 ? `<span class="text-amber-700">• รอข้อมูลเพิ่มเติม: <strong>${applyPlan.incompleteCount}</strong></span>` : ''}
+            ${applyPlan.unmappedCount > 0 && applyPlan.conflictCount === 0 ? `<span class="text-slate-400">• ยังไม่ระบุหลักฐาน: <strong>${applyPlan.unmappedCount}</strong></span>` : ''}
+          </div>
+        </div>
+        <div class="shrink-0 flex items-center gap-2">
+          <button type="button" id="btnApplyMatcherMapping"
+                  class="btn-apply-matcher px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 shadow-xs ${
+                    applyPlan.readyCount > 0 && applyPlan.conflictCount === 0
+                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
+                      : 'bg-slate-200 text-slate-400 cursor-not-allowed pointer-events-none'
+                  }"
+                  title="${applyPlan.conflictCount > 0 ? 'มีข้อขัดแย้ง ไม่สามารถใช้ผลการจับคู่ได้' : 'นำผลการจับคู่ของ Matcher ไปผูกรูปภาพกับพัสดุในหน้าจอหลัก'}">
+            <i class="fa-solid fa-check"></i> ใช้ผลการจับคู่ (${applyPlan.readyCount}/${applyPlan.totalApiCount})
+          </button>
+        </div>
+      </div>
+      ${applyPlan.conflicts.length > 0 ? `
+        <div class="mt-2.5 pt-2 border-t border-rose-200/80 text-[11px] text-rose-700 space-y-1">
+          <div class="font-bold flex items-center gap-1">
+            <i class="fa-solid fa-triangle-exclamation"></i> รายการที่ต้องตรวจสอบและแก้ไขก่อน Apply:
+          </div>
+          <ul class="list-disc list-inside space-y-0.5 text-[10px] text-rose-800">
+            ${applyPlan.conflicts.slice(0, 3).map(c => `
+              <li>หน้า ${c.photoIndex + 1} (Seq ${c.seqNo ?? '-'}): ${escapeHtml(c.reason)}</li>
+            `).join('')}
+            ${applyPlan.conflicts.length > 3 ? `<li>และอีก ${applyPlan.conflicts.length - 3} รายการ...</li>` : ''}
+          </ul>
+        </div>
+      ` : ''}
+    </div>
+  `;
+
+  container.innerHTML = matcherBannerHtml + state.photos.map((photo, idx) => {
     const start = photo.startNo ?? '';
     const end = photo.endNo ?? '';
     const title = photo.label || `หน้า ${idx + 1}`;
@@ -2357,6 +2432,38 @@ function renderPageManageList() {
       }
     };
   });
+
+  // Handle explicit Supervised Apply button
+  const btnApply = container.querySelector('#btnApplyMatcherMapping');
+  if (btnApply) {
+    btnApply.onclick = () => {
+      try {
+        const plan = buildMatcherApplyPlan(state.photos, state.receiptItems);
+        if (plan.conflictCount > 0) {
+          alert(`พบข้อขัดแย้ง ${plan.conflictCount} รายการ — ไม่สามารถใช้งานการจับคู่ได้ กรุณาตรวจสอบหลักฐาน`);
+          return;
+        }
+        if (plan.readyCount === 0) {
+          alert('ยังไม่มีรายการที่พร้อมจับคู่ (ต้องมีหลักฐานที่ยืนยันแล้วและผล Matcher เป็น STRONG)');
+          return;
+        }
+
+        const confirmProceed = confirm(
+          `ยืนยันนำผลการจับคู่ Matcher ไปผูกกับพัสดุในหน้าจอหลักหรือไม่?\n\n` +
+          `• รายการที่พร้อมจับคู่: ${plan.readyCount} / ${plan.totalApiCount} รายการ\n` +
+          `• รายการที่ไม่มีหลักฐาน: ${plan.unmappedCount} รายการ\n\n` +
+          `การจับคู่จะผูกรูปภาพกับพัสดุตามหลักฐานที่ยืนยันแล้วเท่านั้น (ไม่มีการเดา)`
+        );
+        if (!confirmProceed) return;
+
+        const res = applyMatcherMapping();
+        renderPageManageList();
+        alert(`✓ ใช้งานผลการจับคู่เรียบร้อยแล้ว (${res.appliedCount} / ${res.totalCount} รายการ)\n\nหน้าจอหลักและแท็บรูปภาพได้รับการอัปเดตเรียบร้อยแล้ว`);
+      } catch (err) {
+        alert('เกิดข้อผิดพลาดในการจับคู่: ' + err.message);
+      }
+    };
+  }
 }
 
 function showEmptyPhotoState() {
@@ -2390,6 +2497,9 @@ function startNewSession() {
   state.photos = [];
   state.rawCaptureImage = null;
   state.currentSessionId = null;
+  state.matcherAppliedSignature = null;
+  state.matcherApplyInfo = null;
+  state.lastPreApplySnapshot = null;
 
   localStorage.removeItem('thp_latest_cropped_receipt');
   localStorage.removeItem('thp_latest_session_id');
@@ -3424,6 +3534,384 @@ function runMatcherShadowValidation(rawApiItems = null, paperEvidence = null) {
   return matcherShadowResult;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// MATCHER ENGINE — PHASE 3: SUPERVISED MATCHER APPLY
+// Strictly supervised, zero auto-apply, atomic transactions, evidence-preserving.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Computes a deterministic signature of confirmed manual sequences across photos.
+ * Used to detect when evidence has been modified after an Apply operation.
+ */
+function computeEvidenceSignature(photos) {
+  if (!Array.isArray(photos)) return '';
+  const tokens = [];
+  photos.forEach((photo, pIdx) => {
+    const rcpt = String(photo?.detectedRcpt || '').trim();
+    (photo?.sequences || []).forEach(s => {
+      tokens.push([
+        pIdx,
+        String(s.rcptNo || rcpt || '').trim(),
+        s.seqNo ?? '',
+        cleanTrackNo(s.firstTrack),
+        cleanTrackNo(s.lastTrack),
+        s.qty ?? ''
+      ].join(':'));
+    });
+  });
+  return tokens.sort().join('|');
+}
+
+/**
+ * Checks if current confirmed evidence is stale compared to the signature applied previously.
+ */
+function isMatcherMappingStale(photos, appliedSignature) {
+  if (!appliedSignature) return false;
+  const currentSig = computeEvidenceSignature(photos);
+  return currentSig !== appliedSignature;
+}
+
+/**
+ * Builds a validated, non-destructive Apply Plan from confirmed manual evidence.
+ * Does NOT mutate photos or receiptItems.
+ *
+ * Rules:
+ * 1. Only considers sequences with provenance === 'manual' (or user confirmed).
+ * 2. Matches via Matcher.matchSequence against the real API items array.
+ * 3. Categorizes each sequence into Strong, Conflict, or Incomplete.
+ * 4. Checks for conflicts and ambiguous mappings across photos.
+ * 5. Returns a plan with readyCount, conflictCount, mappings array, and summary.
+ */
+function buildMatcherApplyPlan(photos, receiptItems) {
+  let matcher = (typeof window !== 'undefined' && window.Matcher)
+    ? window.Matcher
+    : (typeof Matcher !== 'undefined' ? Matcher : null);
+
+  if (!matcher && typeof require === 'function') {
+    try { matcher = require('./matcher.js'); } catch (_e) {}
+  }
+
+  const items = Array.isArray(receiptItems) ? receiptItems : [];
+  const safePhotos = Array.isArray(photos) ? photos : [];
+  const signature = computeEvidenceSignature(safePhotos);
+
+  const plan = {
+    totalApiCount: items.length,
+    readyCount: 0,
+    conflictCount: 0,
+    incompleteCount: 0,
+    unmappedCount: items.length,
+    isEligible: false,
+    signature,
+    mappings: new Array(items.length).fill(null),
+    conflicts: [],
+    incompletes: [],
+    sequenceResults: []
+  };
+
+  if (!matcher || items.length === 0 || safePhotos.length === 0) {
+    return plan;
+  }
+
+  // 1. Build track index from API items
+  const { trackMap, apiTracks } = matcher.buildTrackIndex(items);
+
+  // 2. Track which API indexes are already claimed:
+  // apiIndex -> { photoIndex, sIdx, rcptNo, seqNo, trackNo }
+  const claimedApiIndexes = new Map();
+
+  safePhotos.forEach((photo, pIdx) => {
+    const photoRcpt = photo?.detectedRcpt ? String(photo.detectedRcpt).trim() : null;
+    const sequences = Array.isArray(photo?.sequences) ? photo.sequences : [];
+
+    sequences.forEach((seq, sIdx) => {
+      // RULE: Only confirmed manual evidence (provenance === 'manual' or present in photo.sequences)
+      // Pending suggestions in photo.ocrSequenceSuggestions are NEVER evaluated here.
+      const sRcpt = seq.rcptNo ? String(seq.rcptNo).trim() : photoRcpt;
+      const sSeqNo = (seq.seqNo !== null && seq.seqNo !== undefined && seq.seqNo !== '') ? Number(seq.seqNo) : null;
+      let fTrack = cleanTrackNo(seq.firstTrack);
+      let lTrack = cleanTrackNo(seq.lastTrack);
+      let qty = (seq.qty !== null && seq.qty !== undefined && seq.qty !== '') ? Number(seq.qty) : null;
+
+      if (fTrack && (!lTrack || lTrack === fTrack)) {
+        lTrack = fTrack;
+        if (!qty) qty = 1;
+      }
+
+      const mockSeq = {
+        rcptNo: sRcpt,
+        seqNo: sSeqNo,
+        firstTrack: fTrack || null,
+        lastTrack: lTrack || null,
+        qty
+      };
+
+      const matched = matcher.matchSequence(mockSeq, trackMap, apiTracks);
+      const seqSummary = {
+        photoIndex: pIdx,
+        seqIndex: sIdx,
+        rcptNo: sRcpt,
+        seqNo: sSeqNo,
+        firstTrack: fTrack,
+        lastTrack: lTrack,
+        qty,
+        confidence: matched.confidence,
+        conflictReason: matched.conflictReason,
+        trackIndexes: matched.trackIndexes || []
+      };
+      plan.sequenceResults.push(seqSummary);
+
+      if (matched.confidence === matcher.MATCH_CONFIDENCE.STRONG) {
+        let hasCollision = false;
+        let collisionReason = '';
+
+        for (const apiIdx of matched.trackIndexes) {
+          if (claimedApiIndexes.has(apiIdx)) {
+            const prevClaim = claimedApiIndexes.get(apiIdx);
+            if (prevClaim.photoIndex !== pIdx) {
+              // Same track claimed across distinct photos - check if recognized adjacent overlap
+              const isAdjacent = Math.abs(prevClaim.photoIndex - pIdx) <= 1;
+              if (isAdjacent && matched.trackIndexes.length === 1) {
+                // Single track overlap on adjacent photo boundary -> record as alternate
+                if (plan.mappings[apiIdx]) {
+                  plan.mappings[apiIdx].alternatePhotoIndex = pIdx;
+                }
+              } else {
+                hasCollision = true;
+                collisionReason = `API track "${apiTracks[apiIdx]}" is claimed by both Photo ${prevClaim.photoIndex + 1} (Seq ${prevClaim.seqNo ?? '-'}) and Photo ${pIdx + 1} (Seq ${sSeqNo ?? '-'})`;
+                break;
+              }
+            }
+          }
+        }
+
+        if (hasCollision) {
+          plan.conflictCount++;
+          plan.conflicts.push({
+            photoIndex: pIdx,
+            rcptNo: sRcpt,
+            seqNo: sSeqNo,
+            reason: collisionReason
+          });
+          seqSummary.confidence = matcher.MATCH_CONFIDENCE.CONFLICT;
+          seqSummary.conflictReason = collisionReason;
+        } else {
+          matched.trackIndexes.forEach(apiIdx => {
+            claimedApiIndexes.set(apiIdx, { photoIndex: pIdx, seqIndex: sIdx, rcptNo: sRcpt, seqNo: sSeqNo });
+            if (!plan.mappings[apiIdx]) {
+              plan.mappings[apiIdx] = {
+                apiIndex: apiIdx,
+                photoIndex: pIdx,
+                rcptNo: sRcpt,
+                seqNo: sSeqNo,
+                trackNo: apiTracks[apiIdx],
+                confidence: matcher.MATCH_CONFIDENCE.STRONG
+              };
+            }
+          });
+        }
+      } else if (matched.confidence === matcher.MATCH_CONFIDENCE.CONFLICT) {
+        plan.conflictCount++;
+        plan.conflicts.push({
+          photoIndex: pIdx,
+          rcptNo: sRcpt,
+          seqNo: sSeqNo,
+          firstTrack: fTrack,
+          lastTrack: lTrack,
+          reason: matched.conflictReason
+        });
+      } else {
+        plan.incompleteCount++;
+        plan.incompletes.push({
+          photoIndex: pIdx,
+          rcptNo: sRcpt,
+          seqNo: sSeqNo,
+          reason: matched.conflictReason || 'หลักฐานไม่สมบูรณ์'
+        });
+      }
+    });
+  });
+
+  const mappedCount = plan.mappings.filter(Boolean).length;
+  plan.readyCount = mappedCount;
+  plan.unmappedCount = items.length - mappedCount;
+  plan.isEligible = plan.readyCount > 0 && plan.conflictCount === 0;
+
+  return plan;
+}
+
+/**
+ * Applies the validated Matcher mapping atomically.
+ * Transactional: validate -> snapshot -> apply -> verify invariants -> save/render.
+ * Rolls back on any error.
+ */
+function applyMatcherMapping({ targetState = null, dryRun = false } = {}) {
+  const s = targetState || (typeof state !== 'undefined' ? state : null);
+  if (!s || !Array.isArray(s.receiptItems) || !Array.isArray(s.photos)) {
+    throw new Error('INVALID_STATE_FOR_APPLY');
+  }
+
+  const plan = buildMatcherApplyPlan(s.photos, s.receiptItems);
+
+  if (plan.conflictCount > 0) {
+    const reasons = plan.conflicts.map(c => `• ${c.reason}`).join('\n');
+    throw new Error(`CONFLICTS_DETECTED: พบข้อขัดแย้ง ${plan.conflictCount} รายการ ไม่สามารถ Apply ได้:\n${reasons}`);
+  }
+
+  if (plan.readyCount === 0) {
+    throw new Error('NO_READY_MAPPINGS: ไม่พบรายการที่มีหลักฐานตรงกับ API ในระดับ STRONG');
+  }
+
+  if (dryRun) {
+    return { success: true, dryRun: true, plan };
+  }
+
+  // 1. Snapshot for rollback
+  const rollbackSnapshot = {
+    receiptItems: s.receiptItems.map(item => ({
+      no: item.no,
+      photoIndex: item.photoIndex,
+      alternatePhotoIndex: item.alternatePhotoIndex,
+      receiptSeqNo: item.receiptSeqNo,
+      rcptNo: item.rcptNo,
+      mappingSource: item.mappingSource
+    })),
+    photos: s.photos.map(p => ({
+      startNo: p.startNo,
+      endNo: p.endNo,
+      mappingApplied: p.mappingApplied
+    })),
+    matcherAppliedSignature: s.matcherAppliedSignature || null,
+    matcherApplyInfo: s.matcherApplyInfo ? { ...s.matcherApplyInfo } : null
+  };
+
+  try {
+    // 2. Apply mapping
+    plan.mappings.forEach((m, apiIdx) => {
+      if (m && m.photoIndex !== undefined && s.receiptItems[apiIdx]) {
+        s.receiptItems[apiIdx].photoIndex = m.photoIndex;
+        if (m.alternatePhotoIndex !== undefined) {
+          s.receiptItems[apiIdx].alternatePhotoIndex = m.alternatePhotoIndex;
+        } else {
+          delete s.receiptItems[apiIdx].alternatePhotoIndex;
+        }
+        s.receiptItems[apiIdx].receiptSeqNo = m.seqNo;
+        s.receiptItems[apiIdx].rcptNo = m.rcptNo;
+        s.receiptItems[apiIdx].mappingSource = 'matcher';
+      }
+    });
+
+    // 3. Update photo startNo / endNo based on mapped items to keep UI scroll sync aligned
+    s.photos.forEach((photo, pIdx) => {
+      const photoItems = s.receiptItems.filter(i => i.photoIndex === pIdx || i.alternatePhotoIndex === pIdx);
+      if (photoItems.length > 0) {
+        const itemNos = photoItems.map(i => Number(i.no)).filter(Number.isFinite);
+        if (itemNos.length > 0) {
+          photo.startNo = Math.min(...itemNos);
+          photo.endNo = Math.max(...itemNos);
+        }
+      }
+      photo.mappingApplied = true;
+    });
+
+    // 4. Invariant checks
+    if (s.receiptItems.length !== rollbackSnapshot.receiptItems.length) {
+      throw new Error('INVARIANT_VIOLATION: receiptItems count changed');
+    }
+    for (let i = 0; i < s.receiptItems.length; i++) {
+      const it = s.receiptItems[i];
+      if (typeof it.photoIndex === 'number' && (it.photoIndex < 0 || it.photoIndex >= s.photos.length)) {
+        throw new Error(`INVARIANT_VIOLATION: invalid photoIndex ${it.photoIndex} on item ${it.no}`);
+      }
+    }
+
+    // 5. Commit application metadata
+    s.matcherAppliedSignature = plan.signature;
+    s.matcherApplyInfo = {
+      appliedAt: new Date().toISOString(),
+      mappedCount: plan.readyCount,
+      totalCount: s.receiptItems.length,
+      unmappedCount: plan.unmappedCount
+    };
+    s.lastPreApplySnapshot = rollbackSnapshot;
+
+    // 6. UI & Persistence updates (if in browser)
+    if (typeof document !== 'undefined') {
+      if (typeof renderItems === 'function') renderItems();
+      if (typeof renderPhotoTabs === 'function') renderPhotoTabs();
+      if (typeof updateStats === 'function') updateStats();
+      if (typeof triggerAutoSave === 'function') triggerAutoSave();
+    }
+
+    return {
+      success: true,
+      plan,
+      appliedCount: plan.readyCount,
+      totalCount: s.receiptItems.length
+    };
+  } catch (err) {
+    // Rollback snapshot on failure
+    rollbackSnapshot.receiptItems.forEach((saved, idx) => {
+      if (s.receiptItems[idx]) {
+        s.receiptItems[idx].photoIndex = saved.photoIndex;
+        s.receiptItems[idx].alternatePhotoIndex = saved.alternatePhotoIndex;
+        s.receiptItems[idx].receiptSeqNo = saved.receiptSeqNo;
+        s.receiptItems[idx].rcptNo = saved.rcptNo;
+        s.receiptItems[idx].mappingSource = saved.mappingSource;
+      }
+    });
+    rollbackSnapshot.photos.forEach((saved, idx) => {
+      if (s.photos[idx]) {
+        s.photos[idx].startNo = saved.startNo;
+        s.photos[idx].endNo = saved.endNo;
+        s.photos[idx].mappingApplied = saved.mappingApplied;
+      }
+    });
+    s.matcherAppliedSignature = rollbackSnapshot.matcherAppliedSignature;
+    s.matcherApplyInfo = rollbackSnapshot.matcherApplyInfo;
+    throw err;
+  }
+}
+
+/**
+ * Rolls back state to the given snapshot.
+ */
+function rollbackMatcherMapping(snapshot, targetState = null) {
+  const s = targetState || (typeof state !== 'undefined' ? state : null);
+  if (!s || !snapshot || !Array.isArray(snapshot.receiptItems)) return false;
+
+  snapshot.receiptItems.forEach((saved, idx) => {
+    if (s.receiptItems[idx]) {
+      s.receiptItems[idx].photoIndex = saved.photoIndex;
+      s.receiptItems[idx].alternatePhotoIndex = saved.alternatePhotoIndex;
+      s.receiptItems[idx].receiptSeqNo = saved.receiptSeqNo;
+      s.receiptItems[idx].rcptNo = saved.rcptNo;
+      s.receiptItems[idx].mappingSource = saved.mappingSource;
+    }
+  });
+
+  if (Array.isArray(snapshot.photos)) {
+    snapshot.photos.forEach((saved, idx) => {
+      if (s.photos[idx]) {
+        s.photos[idx].startNo = saved.startNo;
+        s.photos[idx].endNo = saved.endNo;
+        s.photos[idx].mappingApplied = saved.mappingApplied;
+      }
+    });
+  }
+
+  s.matcherAppliedSignature = snapshot.matcherAppliedSignature || null;
+  s.matcherApplyInfo = snapshot.matcherApplyInfo || null;
+
+  if (typeof document !== 'undefined') {
+    if (typeof renderItems === 'function') renderItems();
+    if (typeof renderPhotoTabs === 'function') renderPhotoTabs();
+    if (typeof updateStats === 'function') updateStats();
+    if (typeof triggerAutoSave === 'function') triggerAutoSave();
+  }
+  return true;
+}
+
 if (typeof window !== 'undefined') {
   window.cleanTrackNo = cleanTrackNo;
   window.extractTrackCandidates = extractTrackCandidates;
@@ -3439,6 +3927,11 @@ if (typeof window !== 'undefined') {
   window.buildMatcherShadowInput = buildMatcherShadowInput;
   window.runMatcherShadowValidation = runMatcherShadowValidation;
   window.evaluateSequenceValidation = evaluateSequenceValidation;
+  window.computeEvidenceSignature = computeEvidenceSignature;
+  window.isMatcherMappingStale = isMatcherMappingStale;
+  window.buildMatcherApplyPlan = buildMatcherApplyPlan;
+  window.applyMatcherMapping = applyMatcherMapping;
+  window.rollbackMatcherMapping = rollbackMatcherMapping;
   window.getMatcherShadowResult = () => matcherShadowResult;
 }
 
@@ -3455,7 +3948,12 @@ if (typeof module !== 'undefined' && module.exports) {
     buildMatcherPaperEvidence,
     buildMatcherShadowInput,
     runMatcherShadowValidation,
-    evaluateSequenceValidation
+    evaluateSequenceValidation,
+    computeEvidenceSignature,
+    isMatcherMappingStale,
+    buildMatcherApplyPlan,
+    applyMatcherMapping,
+    rollbackMatcherMapping
   };
 }
 
@@ -3807,6 +4305,11 @@ function renderItems() {
             <span class="text-[10px] font-mono font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200" title="หน้าหลัก">
               หน้า ${(item.photoIndex ?? 0) + 1}
             </span>
+            ${item.mappingSource === 'matcher' && item.receiptSeqNo ? `
+              <span class="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-300" title="จับคู่ด้วย Matcher (Seq ${item.receiptSeqNo})">
+                <i class="fa-solid fa-check text-[8px]"></i> Seq ${item.receiptSeqNo}
+              </span>
+            ` : ''}
             ${typeof item.alternatePhotoIndex === 'number' ? `
               <button type="button" class="btn-switch-alt-page text-[10px] font-mono px-1 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-300 hover:bg-amber-100 transition" title="พบในหน้ารอยต่อด้วย (Overlap) คลิกเพื่อสลับดูหน้านี้">
                 +หน้า ${item.alternatePhotoIndex + 1}
