@@ -1061,6 +1061,27 @@ async function scanPhotoLineEvidence(photoIndex) {
   }
 }
 
+let isBatchScanning = false;
+async function autoScanPhotoBatch() {
+  if (isBatchScanning || !state.photos || state.photos.length === 0) return;
+  isBatchScanning = true;
+  try {
+    for (let i = 0; i < state.photos.length; i++) {
+      const photo = state.photos[i];
+      if (!photo) continue;
+      if (!photo.ocrSequenceSuggestions || photo.ocrSequenceSuggestions.length === 0) {
+        try {
+          await scanPhotoLineEvidence(i);
+        } catch (err) {
+          console.warn('Auto scan photo failed for index ' + i, err);
+        }
+      }
+    }
+  } finally {
+    isBatchScanning = false;
+  }
+}
+
 /**
  * Explicit user confirmation of an OCR suggestion.
  * Copies verified/edited values into photo.sequences with provenance: 'manual'.
@@ -1832,6 +1853,33 @@ function resolveReceiptRanges(photos = state.photos, items = state.receiptItems)
   };
 }
 
+function getTrackServicePrefix(trackNo) {
+  if (!trackNo || typeof trackNo !== 'string') return '';
+  const clean = cleanTrackNo(trackNo);
+  return clean ? clean.slice(0, 2).toUpperCase() : '';
+}
+
+function getPhotoServicePrefix(photo) {
+  if (!photo) return null;
+  const seqs = [
+    ...(Array.isArray(photo.sequences) ? photo.sequences : []),
+    ...(Array.isArray(photo.ocrSequenceSuggestions) ? photo.ocrSequenceSuggestions : [])
+  ];
+  for (const s of seqs) {
+    const t = s.firstTrack || s.lastTrack;
+    if (t) {
+      const clean = cleanTrackNo(t);
+      if (clean && clean.length >= 2) {
+        return clean.slice(0, 2).toUpperCase();
+      }
+    }
+  }
+  const label = String(photo.label || photo.name || '');
+  if (/RR|inter/i.test(label)) return 'RR';
+  if (/RJ|domestic|ในประเทศ/i.test(label)) return 'RJ';
+  return null;
+}
+
 function alignReceiptItemsToPhotos() {
   // Sort receipt items strictly by their sequence no
   state.receiptItems = state.receiptItems
@@ -1856,12 +1904,18 @@ function alignReceiptItemsToPhotos() {
     if (hasConfiguredRanges) {
       unmappedItems.forEach(item => {
         const itemSeq = Number(item.no);
+        const itemPrefix = getTrackServicePrefix(item.trackNo || item.barcode);
         let matchedIndex = -1;
         let alternateIndex = -1;
 
         for (let pIdx = 0; pIdx < state.photos.length; pIdx++) {
           const photo = state.photos[pIdx];
           if (Number.isFinite(photo.startNo) && Number.isFinite(photo.endNo)) {
+            // Guard: service prefix consistency (do not cross RJ and RR)
+            const pPrefix = getPhotoServicePrefix(photo);
+            if (pPrefix && itemPrefix && pPrefix !== itemPrefix) {
+              continue;
+            }
             if (itemSeq >= photo.startNo && itemSeq <= photo.endNo) {
               if (matchedIndex === -1) {
                 matchedIndex = pIdx;
@@ -1879,35 +1933,36 @@ function alignReceiptItemsToPhotos() {
           } else {
             delete item.alternatePhotoIndex;
           }
+          item.mappingSource = 'estimated';
         } else {
-          let closestIdx = 0;
-          let minDiff = Infinity;
-          state.photos.forEach((photo, pIdx) => {
-            if (Number.isFinite(photo.startNo) && Number.isFinite(photo.endNo)) {
-              const diff = Math.min(Math.abs(itemSeq - photo.startNo), Math.abs(itemSeq - photo.endNo));
-              if (diff < minDiff) {
-                minDiff = diff;
-                closestIdx = pIdx;
-              }
-            }
-          });
-          item.photoIndex = closestIdx;
+          item.photoIndex = null;
+          item.mappingSource = null;
         }
-        item.mappingSource = 'estimated';
         delete item.scrollAnchor;
       });
     } else {
-      const totalItems = state.receiptItems.length;
-      state.receiptItems.forEach((item, index) => {
-        if (item.mappingSource === 'matcher' || item.mappingSource === 'receipt-range') {
-          return;
-        }
-        item.photoIndex = totalPhotos > 0
-          ? Math.min(totalPhotos - 1, Math.floor(index * totalPhotos / Math.max(1, totalItems)))
-          : 0;
-        item.mappingSource = 'estimated';
-        delete item.scrollAnchor;
-      });
+      const hasVerifiedRanges = state.receiptItems.some(it => it.mappingSource === 'matcher' || it.mappingSource === 'receipt-range');
+      if (hasVerifiedRanges) {
+        // In a verified receipt workflow, DO NOT blindly allocate unmapped items to arbitrary photos!
+        // Unmapped items remain unmapped until their corresponding photo is scanned/configured.
+        unmappedItems.forEach(item => {
+          item.photoIndex = null;
+          item.mappingSource = null;
+          delete item.scrollAnchor;
+        });
+      } else {
+        const totalItems = state.receiptItems.length;
+        state.receiptItems.forEach((item, index) => {
+          if (item.mappingSource === 'matcher' || item.mappingSource === 'receipt-range') {
+            return;
+          }
+          item.photoIndex = totalPhotos > 0
+            ? Math.min(totalPhotos - 1, Math.floor(index * totalPhotos / Math.max(1, totalItems)))
+            : 0;
+          item.mappingSource = 'estimated';
+          delete item.scrollAnchor;
+        });
+      }
     }
   }
 
@@ -4209,6 +4264,33 @@ async function requestApiAccessToken({ force = false } = {}) {
 
 async function requestReceiptTracking(fullTRCode, { retryAuth = true } = {}) {
   const accessToken = await requestApiAccessToken();
+  const codesToQuery = new Set();
+
+  if (Array.isArray(fullTRCode)) {
+    fullTRCode.forEach(c => c && codesToQuery.add(String(c).trim()));
+  } else if (typeof fullTRCode === 'string' && fullTRCode.trim()) {
+    codesToQuery.add(fullTRCode.trim());
+  }
+
+  // Also include candidate codes if available
+  const zip = state.defaultZipPrefix || '10501';
+  (state.photos || []).forEach(p => {
+    if (p.detectedRcpt) {
+      const cleanRcpt = String(p.detectedRcpt).replace(/\D/g, '');
+      if (cleanRcpt) {
+        codesToQuery.add(`${zip}|${cleanRcpt}`);
+      }
+    }
+    if (p.detectedTR) {
+      const cleanTr = String(p.detectedTR).replace(/\D/g, '');
+      if (cleanTr) {
+        codesToQuery.add(`${zip}|${cleanTr}`);
+      }
+    }
+  });
+
+  const receiptNoArray = Array.from(codesToQuery);
+
   const response = await fetch(TRACK_API_BASE + '/receipt/track', {
     method: 'POST',
     headers: {
@@ -4218,7 +4300,7 @@ async function requestReceiptTracking(fullTRCode, { retryAuth = true } = {}) {
     body: JSON.stringify({
       status: 'all',
       language: 'TH',
-      receiptNo: [fullTRCode]
+      receiptNo: receiptNoArray.length > 0 ? receiptNoArray : [fullTRCode]
     })
   });
 
@@ -5069,6 +5151,9 @@ if (typeof window !== 'undefined') {
   window.getSequenceScrollAnchor = getSequenceScrollAnchor;
   window.renderItems = renderItems;
   window.handleExcelUpload = handleExcelUpload;
+  window.autoScanPhotoBatch = autoScanPhotoBatch;
+  window.getTrackServicePrefix = getTrackServicePrefix;
+  window.getPhotoServicePrefix = getPhotoServicePrefix;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -5108,7 +5193,10 @@ if (typeof module !== 'undefined' && module.exports) {
     resolveReceiptRanges,
     getSequenceScrollAnchor,
     renderItems,
-    handleExcelUpload
+    handleExcelUpload,
+    autoScanPhotoBatch,
+    getTrackServicePrefix,
+    getPhotoServicePrefix
   };
 }
 
@@ -5243,6 +5331,9 @@ function setupEventListeners() {
     newPhotos.forEach(photo => {
       processPhotoHeaderIdentity(photo);
     });
+
+    // Automatically scan line items and resolve ranges for all uploaded photos in the background
+    autoScanPhotoBatch();
   });
 
   // Track Detail Modal
@@ -5293,6 +5384,7 @@ function handleExcelUpload(e) {
       processExcelRows(json);
       if (state.photos.length > 0) {
         alignReceiptItemsToPhotos();
+        autoScanPhotoBatch();
       }
     } catch (err) {
       alert('เกิดข้อผิดพลาดในการอ่านไฟล์ Excel: ' + err.message);
